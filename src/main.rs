@@ -379,9 +379,11 @@ fn handle_list_command_if_needed(
     }
 }
 
+/// 核心解析器：从命令行中提取可能的自定义 Wine 路径（最高优先级）、目标程序及剩余参数
 fn parse_target_executable_and_remaining_arguments_from_cli(
     vector_of_strings_representing_command_line_arguments: &[String]
-) -> (Option<String>, Vec<String>) {
+) -> (Option<String>, Option<String>, Vec<String>) {
+    let mut option_representing_cli_custom_wine_path: Option<String> = None;
     let mut option_representing_raw_target_executable: Option<String> = None;
     let mut vector_of_strings_representing_remaining_cli_arguments: Vec<String> = Vec::new();
 
@@ -395,6 +397,8 @@ fn parse_target_executable_and_remaining_arguments_from_cli(
             || string_representing_first_argument_lowercase.ends_with("/wine64"))
             && vector_of_strings_representing_command_line_arguments.len() > 1
         {
+            // 如果第一个参数是 wine 且有后续参数，说明这是一个自定义 wine 引擎声明，提取并保留为最高优先级引擎路径
+            option_representing_cli_custom_wine_path = Some(string_representing_first_argument.clone());
             option_representing_raw_target_executable = Some(vector_of_strings_representing_command_line_arguments[1].clone());
             vector_of_strings_representing_remaining_cli_arguments = vector_of_strings_representing_command_line_arguments.iter().skip(2).cloned().collect();
         } else {
@@ -409,7 +413,7 @@ fn parse_target_executable_and_remaining_arguments_from_cli(
         }
     }
 
-    (option_representing_raw_target_executable, vector_of_strings_representing_remaining_cli_arguments)
+    (option_representing_cli_custom_wine_path, option_representing_raw_target_executable, vector_of_strings_representing_remaining_cli_arguments)
 }
 
 fn resolve_sandbox_identity(
@@ -497,13 +501,21 @@ fn resolve_target_executable_and_validate(
         }
     };
 
+    let array_of_strings_representing_wine_builtins = [
+        "winecfg", "regedit", "control", "uninstaller", "wineconsole", 
+        "cmd", "explorer", "notepad", "taskmgr", "msiexec"
+    ];
+
     let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
     let string_representing_target_executable_lowercase = string_representing_raw_path_to_target_executable_file.to_lowercase();
+    let boolean_flag_indicating_is_builtin = array_of_strings_representing_wine_builtins.contains(&string_representing_raw_path_to_target_executable_file.as_str());
+
     if string_representing_target_executable_lowercase.ends_with(".exe") 
         || string_representing_target_executable_lowercase.ends_with(".bat")
         || string_representing_target_executable_lowercase.ends_with(".cmd") 
         || string_representing_target_executable_lowercase.ends_with(".msi") 
         || string_representing_target_executable_lowercase.ends_with(".reg")
+        || boolean_flag_indicating_is_builtin
     {
         boolean_flag_indicating_wine_prefix_prepending_needed = true;
     }
@@ -511,8 +523,7 @@ fn resolve_target_executable_and_validate(
     let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(&string_representing_raw_path_to_target_executable_file)
         .unwrap_or_else(|_| PathBuf::from(&string_representing_raw_path_to_target_executable_file));
 
-    // 启发式探测拦截
-    let array_of_strings_representing_wine_builtins = ["winecfg", "regedit", "control", "uninstaller", "wineconsole", "explorer"];
+    // 启发式探测拦截：如果包含路径符号，进行物理检查；若是内置指令，放行且无视不存在报错
     if string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\') {
         if !path_buf_representing_absolute_path_to_target_executable_file.exists() {
             eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable file not found -> {}", string_representing_raw_path_to_target_executable_file);
@@ -529,8 +540,8 @@ fn resolve_target_executable_and_validate(
                 }
             }
         }
-    } else if !array_of_strings_representing_wine_builtins.contains(&string_representing_raw_path_to_target_executable_file.as_str()) {
-        // 软警告拦截...
+    } else if boolean_flag_indicating_is_builtin {
+        // 内置指令白名单放行，彻底免疫 ELF 误伤拦截，并免除文件存在性物理检测。
     }
 
     TargetSpecification {
@@ -742,6 +753,7 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     target_specification_representing_validated_execution: TargetSpecification,
     vector_of_strings_representing_sorted_directories_to_create: Vec<String>,
     vector_of_verified_mount_specifications: Vec<MountSpecification>,
+    option_representing_cli_custom_wine_path: Option<String>,
 ) -> ! {
     let mut vector_of_strings_representing_bubblewrap_command_arguments: Vec<String> = Vec::new();
     let pyramid = &sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers;
@@ -882,7 +894,12 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("GST_PLUGIN_PATH"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from(""));
 
-    let string_representing_custom_wine_binary_path = pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine");
+    // Unified Command Gatekeeper: CLI 覆盖自定义 Wine 路径
+    let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
+        string_representing_cli_wine_path
+    } else {
+        pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine")
+    };
 
     // LD_LIBRARY_PATH Magic Sniffing
     if pyramid.resolve_configuration_value("LD_LIBRARY_PATH", "").is_empty() {
@@ -907,12 +924,15 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
 
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--die-with-parent"));
 
+    // 智能防御回退：如果执行的是内置指令(非物理文件/目录)，CWD 回退到安全的 $HOME，防止 bwrap 崩溃
     let path_buf_representing_target_working_directory = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
         target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.parent()
             .map(|parent| parent.to_path_buf())
             .unwrap_or_else(|| sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone())
-    } else {
+    } else if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_dir() {
         target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone()
+    } else {
+        sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone()
     };
     let string_representing_target_working_directory_path = path_buf_representing_target_working_directory.to_string_lossy().into_owned();
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--chdir"));
@@ -923,9 +943,11 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     if pyramid.resolve_configuration_value("WINER_GAMEMODE", "0") == "1" {
         vector_of_strings_representing_sandbox_inner_command_execution.push(String::from("gamemoderun"));
     }
+    
     if target_specification_representing_validated_execution.boolean_flag_indicating_wine_prefix_prepending_needed {
         vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_custom_wine_binary_path);
     }
+    
     vector_of_strings_representing_sandbox_inner_command_execution.push(target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file);
     
     for string_slice_representing_arg in pyramid.resolve_configuration_value("WINER_EXE_ARGS", "").split_whitespace() {
@@ -972,7 +994,7 @@ fn main() {
         &path_buf_representing_sandbox_data_root_directory,
     );
 
-    let (option_representing_raw_target_executable, vector_of_strings_representing_remaining_cli_arguments) = 
+    let (option_representing_cli_custom_wine_path, option_representing_raw_target_executable, vector_of_strings_representing_remaining_cli_arguments) = 
         parse_target_executable_and_remaining_arguments_from_cli(&vector_of_strings_representing_command_line_arguments);
 
     let string_representing_derived_sandbox_identifier = resolve_sandbox_identity(
@@ -1019,5 +1041,6 @@ fn main() {
         target_specification_representing_validated_execution,
         vector_of_strings_representing_sorted_directories_to_create,
         vector_of_verified_mount_specifications,
+        option_representing_cli_custom_wine_path,
     );
 }
