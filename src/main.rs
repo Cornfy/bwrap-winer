@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
@@ -212,6 +213,7 @@ fn print_bwrap_winer_help_information() {
     println!("USAGE:");
     println!("    bwrap-winer <executable.exe> [arguments...]");
     println!("    bwrap-winer /path/to/wine <executable.exe> [arguments...]");
+    println!("    WINER_ID=myapp bwrap-winer");
     println!("    bwrap-winer --list");
     println!("    bwrap-winer -h | --help");
     println!();
@@ -229,6 +231,8 @@ fn print_bwrap_winer_help_information() {
     println!("    Runtime Meta   $XDG_DATA_HOME/bwrap-winer/sandboxes/[SANDBOX_ID]/winer_meta.toml");
     println!();
     println!("SUPPORTED CONFIGURATION KEYS & ENVIRONMENT VARIABLES:");
+    println!("    WINER_EXE_PATH   Target executable file path (can substitute CLI argument).");
+    println!("    WINER_EXE_ARGS   Arguments to pass to the target executable.");
     println!("    WINER_ID         Explicit override for the unique sandbox identifier.");
     println!("    WINER_DATA_ROOT  Alternative root directory path for sandboxes storage.");
     println!("    WINER_NET        Network access control: '1' (shared, default) or '0' (disconnected).");
@@ -251,8 +255,15 @@ fn main() {
         || vector_of_strings_representing_command_line_arguments[0] == "-h"
         || vector_of_strings_representing_command_line_arguments[0] == "--help"
     {
-        print_bwrap_winer_help_information();
-        std::process::exit(0);
+        // 允许通过环境变量无参启动，仅在既没有参数也没有环境变量时才触发 Help
+        if std::env::var("WINER_EXE_PATH").is_err() && std::env::var("WINER_ID").is_err() {
+            print_bwrap_winer_help_information();
+            std::process::exit(0);
+        } else if vector_of_strings_representing_command_line_arguments.len() > 0 && 
+                  (vector_of_strings_representing_command_line_arguments[0] == "-h" || vector_of_strings_representing_command_line_arguments[0] == "--help") {
+            print_bwrap_winer_help_information();
+            std::process::exit(0);
+        }
     }
 
     let path_buf_representing_host_home_directory = std::env::var_os("HOME")
@@ -271,7 +282,7 @@ fn main() {
     // ==========================================
     // 📦 额外特性：--list 用于在终端直接罗列并检索已持久化的沙箱 ID
     // ==========================================
-    if vector_of_strings_representing_command_line_arguments[0] == "--list" {
+    if !vector_of_strings_representing_command_line_arguments.is_empty() && vector_of_strings_representing_command_line_arguments[0] == "--list" {
         let path_buf_representing_global_configuration_file_path = path_buf_representing_global_config_root.join("config.toml");
         let hash_map_representing_global_configuration_keys_and_values = parse_simple_flat_toml_file_into_hash_map(
             &path_buf_representing_global_configuration_file_path,
@@ -322,28 +333,37 @@ fn main() {
         &path_buf_representing_global_configuration_file_path,
     );
 
-    let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
+    // ==========================================
+    // 🔍 目标文件与参数的初始解析 (CLI 与 ENV 优先)
+    // 智能兼容 /path/to/wine /path/to/game.exe 这样的级联参数，精准抓取真正的 target exe 及其后续剩余参数
+    // ==========================================
+    let mut option_representing_raw_target_executable: Option<String> = None;
+    let mut vector_of_strings_representing_remaining_cli_arguments: Vec<String> = Vec::new();
 
-    // 分析第一个参数，智能兼容 /path/to/wine /path/to/game.exe 这样的级联参数，精准抓取真正的 game.exe 作为特征分析对象
-    let string_representing_first_argument = &vector_of_strings_representing_command_line_arguments[0];
-    let string_representing_first_argument_lowercase = string_representing_first_argument.to_lowercase();
-    let string_representing_raw_path_to_target_executable_file = if string_representing_first_argument_lowercase.ends_with(".exe") {
-        boolean_flag_indicating_wine_prefix_prepending_needed = true;
-        string_representing_first_argument.clone()
-    } else if (string_representing_first_argument_lowercase == "wine"
-        || string_representing_first_argument_lowercase == "wine64"
-        || string_representing_first_argument_lowercase.ends_with("/wine")
-        || string_representing_first_argument_lowercase.ends_with("/wine64"))
-        && vector_of_strings_representing_command_line_arguments.len() > 1
-    {
-        vector_of_strings_representing_command_line_arguments[1].clone()
-    } else {
-        string_representing_first_argument.clone()
-    };
+    if !vector_of_strings_representing_command_line_arguments.is_empty() {
+        let string_representing_first_argument = &vector_of_strings_representing_command_line_arguments[0];
+        let string_representing_first_argument_lowercase = string_representing_first_argument.to_lowercase();
+        
+        if (string_representing_first_argument_lowercase == "wine"
+            || string_representing_first_argument_lowercase == "wine64"
+            || string_representing_first_argument_lowercase.ends_with("/wine")
+            || string_representing_first_argument_lowercase.ends_with("/wine64"))
+            && vector_of_strings_representing_command_line_arguments.len() > 1
+        {
+            option_representing_raw_target_executable = Some(vector_of_strings_representing_command_line_arguments[1].clone());
+            vector_of_strings_representing_remaining_cli_arguments = vector_of_strings_representing_command_line_arguments.iter().skip(2).cloned().collect();
+        } else {
+            option_representing_raw_target_executable = Some(string_representing_first_argument.clone());
+            vector_of_strings_representing_remaining_cli_arguments = vector_of_strings_representing_command_line_arguments.iter().skip(1).cloned().collect();
+        }
+    }
 
-    // 将目标文件路径转换为物理绝对路径以确保哈希的绝对唯一性
-    let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(&string_representing_raw_path_to_target_executable_file)
-        .unwrap_or_else(|_| PathBuf::from(&string_representing_raw_path_to_target_executable_file));
+    // 补充获取环境变量 WINER_EXE_PATH (如果 CLI 没提供)
+    if option_representing_raw_target_executable.is_none() {
+        if let Ok(string_representing_env_exe_path) = std::env::var("WINER_EXE_PATH") {
+            option_representing_raw_target_executable = Some(string_representing_env_exe_path);
+        }
+    }
 
     // 根据 XDG 规范定位并解析 WINER_DATA_ROOT 路径
     let path_buf_representing_default_data_root = std::env::var_os("XDG_DATA_HOME")
@@ -381,10 +401,16 @@ fn main() {
             let string_representing_prefix_slug = generate_slug_from_absolute_filesystem_path(&path_buf_representing_explicit_wine_prefix);
             let string_representing_prefix_hash = calculate_fnv1a_64_bit_hash_of_string(&path_buf_representing_explicit_wine_prefix.to_string_lossy());
             format!("{}-{}", string_representing_prefix_slug, string_representing_prefix_hash)
-        } else {
+        } else if let Some(string_representing_known_exe) = &option_representing_raw_target_executable {
+            let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(string_representing_known_exe)
+                .unwrap_or_else(|_| PathBuf::from(string_representing_known_exe));
             let string_representing_executable_slug = generate_slug_from_absolute_filesystem_path(&path_buf_representing_absolute_path_to_target_executable_file);
             let string_representing_executable_hash = calculate_fnv1a_64_bit_hash_of_string(&path_buf_representing_absolute_path_to_target_executable_file.to_string_lossy());
             format!("{}-{}", string_representing_executable_slug, string_representing_executable_hash)
+        } else {
+            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable or WINER_ID not specified.");
+            eprintln!("[bwrap-winer] Usage: WINER_ID=myapp bwrap-winer OR bwrap-winer /path/to/exe");
+            std::process::exit(1);
         }
     };
 
@@ -412,6 +438,73 @@ fn main() {
         eprintln!("CRITICAL ERROR: Failed to create sandbox persistence directory: {:?}", error_representing_failed_directory_creation);
         std::process::exit(1);
     }
+
+    // ==========================================
+    // 🎯 目标程序的最终判定与特征分析
+    // ==========================================
+    let string_representing_raw_path_to_target_executable_file = match option_representing_raw_target_executable {
+        Some(string_representing_known_exe) => string_representing_known_exe,
+        None => {
+            let string_representing_resolved_exe_path = resolve_configuration_value_from_hierarchical_sources(
+                "WINER_EXE_PATH",
+                &hash_map_representing_sandbox_local_configuration_keys_and_values,
+                &hash_map_representing_sandbox_specific_user_configuration_keys_and_values,
+                &hash_map_representing_global_configuration_keys_and_values,
+                "",
+            );
+            if string_representing_resolved_exe_path.is_empty() {
+                eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable could not be resolved from CLI, ENV, or TOML configs.");
+                std::process::exit(1);
+            }
+            string_representing_resolved_exe_path
+        }
+    };
+
+    let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
+    let string_representing_target_executable_lowercase = string_representing_raw_path_to_target_executable_file.to_lowercase();
+    if string_representing_target_executable_lowercase.ends_with(".exe") 
+        || string_representing_target_executable_lowercase.ends_with(".bat")
+        || string_representing_target_executable_lowercase.ends_with(".cmd") 
+        || string_representing_target_executable_lowercase.ends_with(".msi") 
+        || string_representing_target_executable_lowercase.ends_with(".reg")
+    {
+        boolean_flag_indicating_wine_prefix_prepending_needed = true;
+    }
+
+    // 将目标文件路径转换为物理绝对路径以确保哈希的绝对唯一性以及穿透挂载的基准参考
+    let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(&string_representing_raw_path_to_target_executable_file)
+        .unwrap_or_else(|_| PathBuf::from(&string_representing_raw_path_to_target_executable_file));
+
+    // ==========================================
+    // 🛡️ 启发式二进制特征探测 (Heuristic Binary Probing)
+    // 根据 Unix 哲学，不穷举白名单，只利用特征码精准拦截原生 ELF
+    // ==========================================
+    let array_of_strings_representing_wine_builtins = ["winecfg", "regedit", "control", "uninstaller", "wineconsole", "explorer"];
+    
+    // 如果包含路径符号，说明它是一个具体文件，需要严格检查其物理结构和魔数特征
+    if string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\') {
+        if !path_buf_representing_absolute_path_to_target_executable_file.exists() {
+            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable file not found -> {}", string_representing_raw_path_to_target_executable_file);
+            std::process::exit(1);
+        }
+        
+        if let Ok(mut file_representing_target_executable) = std::fs::File::open(&path_buf_representing_absolute_path_to_target_executable_file) {
+            let mut array_of_bytes_representing_magic_number = [0u8; 4];
+            if file_representing_target_executable.read(&mut array_of_bytes_representing_magic_number).is_ok() {
+                // 核心硬拦截：探测到 \x7fELF 头，代表是 Linux 原生程序，坚决拒绝代理。
+                if array_of_bytes_representing_magic_number == [0x7f, 0x45, 0x4c, 0x46] {
+                    eprintln!("[bwrap-winer] SECURITY BLOCK: '{}' is a native Linux ELF binary.", string_representing_raw_path_to_target_executable_file);
+                    eprintln!("[bwrap-winer] This tool is strictly a Wine sandbox proxy. Refusing to run native Linux programs.");
+                    std::process::exit(1);
+                }
+                // 对于 Windows PE (MZ) 或者非二进制脚本/配置文本 (.reg, .bat, etc.)，安全放行，由 Wine 内部调度器接管。
+            }
+        }
+    } else if !array_of_strings_representing_wine_builtins.contains(&string_representing_raw_path_to_target_executable_file.as_str()) {
+        // 对于没有任何路径符号且不在常用内置列表的命令，提供一次软警告提示，但遵循代理不干涉原则放行。
+        // （这种可能是由 Wine 环境变量中的 PATH 或别名提供）
+    }
+
 
     // ==========================================
     // 🛠️ 组装 Bubblewrap 启动参数链
@@ -946,14 +1039,34 @@ fn main() {
         vector_of_strings_representing_sandbox_inner_command_execution.push(String::from("gamemoderun"));
     }
 
+    // 智能追加 wine 层
     if boolean_flag_indicating_wine_prefix_prepending_needed {
         vector_of_strings_representing_sandbox_inner_command_execution.push(String::from("wine"));
     }
 
-    for string_representing_argument in vector_of_strings_representing_command_line_arguments {
-        vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_argument);
+    // 推入目标执行文件
+    vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_raw_path_to_target_executable_file);
+
+    // 提取并推入源自配置的 WINER_EXE_ARGS (环境变量或 TOML)
+    let string_representing_resolved_exe_args = resolve_configuration_value_from_hierarchical_sources(
+        "WINER_EXE_ARGS",
+        &hash_map_representing_sandbox_local_configuration_keys_and_values,
+        &hash_map_representing_sandbox_specific_user_configuration_keys_and_values,
+        &hash_map_representing_global_configuration_keys_and_values,
+        "",
+    );
+    for string_slice_representing_arg in string_representing_resolved_exe_args.split_whitespace() {
+        if !string_slice_representing_arg.is_empty() {
+            vector_of_strings_representing_sandbox_inner_command_execution.push(string_slice_representing_arg.to_string());
+        }
     }
 
+    // 推入源自命令行的剩余跟随参数
+    for string_representing_cli_argument in vector_of_strings_representing_remaining_cli_arguments {
+        vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_cli_argument);
+    }
+
+    // 合并命令管线
     for string_representing_inner_argument in vector_of_strings_representing_sandbox_inner_command_execution {
         vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_inner_argument);
     }
