@@ -1,0 +1,46 @@
+name: Release Static Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Static Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+      - name: Build Static Binaries via Makefile
+        run: make release
+
+      - name: Calculate Checksums
+        id: checksums
+        run: |
+          echo "## Changelog" > changelog.md
+          echo "This release contains statically compiled binaries compiled via rust-lld." >> changelog.md
+          echo "" >> changelog.md
+          echo "### SHA256 Checksums" >> changelog.md
+          echo "\`\`\`" >> changelog.md
+          sha256sum builds/* | sed 's|builds/||' >> changelog.md
+          echo "\`\`\`" >> changelog.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: changelog.md
+          files: |
+            builds/bwrap-winer_linux_amd64
+            builds/bwrap-winer_linux_arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
