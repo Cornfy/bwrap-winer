@@ -1,0 +1,150 @@
+# =====================================================================
+# 🛠️ bwrap-winer - Master Reference Configuration Template
+# =====================================================================
+# Notes:
+# 1. This file follows the flat TOML specification (KEY = "VALUE").
+# 2. Both '#' and ';' are supported for full-line and trailing comments.
+# 3. Any key-value pair NOT starting with "WINER_" will be automatically
+#    injected into the sandbox environment as an environment variable.
+#
+# ⚠️ WARNING: Content inside quotes is treated as a literal string.
+#    Shell expansions like '~' or '$HOME' are NOT supported.
+
+
+# =====================================================================
+# PART 1: bwrap-winer Dedicated Sandbox Parameters
+# =====================================================================
+
+# [General Sandbox Settings]
+# Host directory where persistent sandbox directories will be stored.
+# If omitted, it defaults to: ~/.local/share/bwrap-winer/sandboxes
+; WINER_DATA_ROOT = "/home/username/.local/share/bwrap-winer/sandboxes"
+
+# Absolute path to a custom Wine binary required for this application.
+# The tool automatically backtracks the parent path, auto-mounts the root,
+# and injects the appropriate LD_LIBRARY_PATH!
+; WINER_WINE_PATH = "/path/to/your/custom/wine/bin/wine"
+
+# Network Isolation: 
+# "1" - Shares the host network (default, convenient for online games).
+# "0" - Disconnects the network entirely for isolated secure execution.
+WINER_NET = "1"
+
+# PID Isolation:
+# "1" - Shares the host process tree (default).
+# "0" - Strict process isolation (prevents Windows apps from scanning Linux processes).
+WINER_SHARE_PID = "1"
+
+# IPC Isolation:
+# "1" - Shares IPC namespace (default, guarantees full GPU rendering framerates).
+# "0" - Isolates IPC (safer, but Vulkan or 3D hardware acceleration may break).
+WINER_IPC = "1"
+
+# Hardware Device Passthrough:
+# "1" - Exposes full /dev (default, supports gamepads, media keys, peripherals).
+# "0" - Minimal exposure (only retains NVIDIA/DRI graphics rendering nodes).
+WINER_DEV = "1"
+
+# [Performance & Optimizations]
+# High-Performance Wrapper: 
+# "1" - Prepends 'gamemoderun' to lock high-performance profiles (requires Feral GameMode).
+# "0" - Disabled (default).
+WINER_GAMEMODE = "0"
+
+# --------------------------------------------------------------------
+# ⚠️ TIP: The parameters below are recommended for use ONLY in specific 
+#    '[WINER_ID].toml' profiles rather than the global configuration.
+
+# [Target Application & Arguments]
+# Explicit override for the unique sandbox identifier.
+# Defaults to a short hash computed from the EXE path or WINEPREFIX.
+; WINER_ID = "my_custom_sandbox_id"
+
+# Absolute host path to the target Windows executable file.
+; WINER_EXE_PATH = "/path/to/your/application.exe"
+
+# Command-line arguments passed to the target Windows executable.
+; WINER_EXE_ARGS = "-nofbo -high -windowed"
+# --------------------------------------------------------------------
+
+# [Directory Binds & Executable Penetration]
+# Read-Write Bind Mounts: Map host paths into the sandbox (comma-separated).
+# Supports two syntax formats:
+#   1. Minimal Mode: Direct host path (e.g., "/home/user/Downloads"). Maps to the exact same path.
+#   2. Redirect Mode: Colon-separated (e.g., "/host_dir:/container_dir"). Maps to a different location.
+; WINER_BIND = "/home/user/Downloads,/mnt/data/Mods:/home/user/Mods"
+
+# Read-Only Bind Mounts: High security, prevents sandbox modifications (comma-separated, same syntax).
+# 💡 NOTE: Custom Wine/Proton engines specified via WINER_WINE_PATH are automatically
+#    auto-mounted as read-only. You do NOT need to specify them here!
+; WINER_RO_BIND = ""
+
+# Directory Penetration Depth:
+# "0" - Mounts only the target EXE file itself as read-only.
+# "1" - Mounts the parent directory of the EXE, allowing resource read/write (default).
+# "n" - Penetrates and mounts 'n' levels of parent directories.
+WINER_PENETRATE = "1"
+
+
+# =====================================================================
+# PART 2: Common Wine Behaviors & Compatibility Options
+# =====================================================================
+
+# Host Wine Prefix path. Auto-mounts the custom prefix and heals sandbox mounts.
+# Defaults to ~/.wine inside the sandbox (physically at ${WINER_DATA_ROOT}/${WINER_ID}/sandbox_home/.wine).
+# WINEPREFIX = "/home/user/.local/share/bwrap-winer/prefixes/default"
+
+# Architecture: Forces the Wine prefix to initialize in "win32" or "win64" mode.
+WINEARCH = "win64"
+
+# Core Synchronization Optimization:
+# WINEESYNC = "1"      # Enables Eventfd-based sync (minimizes CPU bottlenecks, requires esync support).
+WINEFSYNC = "1"        # Enables Futex-based sync (performs better than esync, requires Linux 5.16+).
+
+# Large Address Awareness: Forces 32-bit applications to access up to 4GB memory (fixes RAM out-of-memory crashes).
+WINE_LARGE_ADDRESS_AWARE = "1"
+
+# Wine Debug Output Logging Control:
+# "-all"           # Silences all Wine errors/outputs (increases performance).
+# "fixme-all"      # Only silences annoying 'fixme' unimplemented alerts (recommended).
+# "warn+all"       # Prints all warnings (useful for debugging crashes and errors).
+WINEDEBUG = "-all"
+
+# Virtual Desktop: Constrains execution to a simulated resolution inside a window.
+; WINE_DESKTOP_USER_X11 = "1920x1080"
+
+
+# =====================================================================
+# PART 3: GPU Drivers, Rendering, and Graphics Translation (DXVK/VKD3D)
+# =====================================================================
+
+# NVIDIA Hybrid Laptops: Force rendering on the high-performance dedicated GPU.
+; __NV_PRIME_RENDER_OFFLOAD = "1"
+; __GLX_VENDOR_LIBRARY_NAME = "nvidia"
+
+# Vulkan ICD Driver Routing (Prevents the sandbox from loading the wrong GPU drivers):
+# AMD Radeon: "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+# NVIDIA: "/usr/share/vulkan/icd.d/nvidia_icd.json"
+; VK_ICD_FILENAMES = "/usr/share/vulkan/icd.d/nvidia_icd.json"
+
+# DXVK (Direct3D 9/10/11 -> Vulkan) Controls:
+; DXVK_HUD = "compiler"        # Displays compiler status ("fps" for frame rate, "compiler", "full" for all).
+; DXVK_ASYNC = "1"             # Enables async shader compilation (requires a custom DXVK with the async patch).
+; DXVK_STATE_CACHE_PATH = "/path/to/cache" # Sets the DXVK state cache path to avoid compiling shaders repeatedly.
+
+# VKD3D (Direct3D 12 -> Vulkan) Controls:
+; VKD3D_CONFIG = "dxr11,dxr"   # Attempt to enable Ray Tracing support in D3D12 games.
+; VKD3D_DEBUG = "warn"         # Logs internal compatibility warnings.
+
+
+# =====================================================================
+# PART 4: Performance Monitoring, Overlays, and Advanced Options
+# =====================================================================
+
+# MangoHUD Performance Overlay:
+; MANGOHUD = "1"               # Enables MangoHUD overlay in games.
+; MANGOHUD_CONFIG = "cpu_temp,gpu_temp,ram,vram,core_load,fps,frametime,position=top-right"
+
+# Sound Server Routing: Force Wine to use a specific audio driver backend.
+# Options: ALSA, OSS, PulseAudio, or PipeWire ("pipewire").
+; AUDIODEV = "pipewire"

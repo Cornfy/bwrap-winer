@@ -1,0 +1,50 @@
+# =====================================================================
+# 🛠️ bwrap-winer - Master Reference Configuration Template
+# =====================================================================
+# Notes:
+# 1. This file follows the flat TOML specification (KEY = "VALUE").
+# 2. Both '#' and ';' are supported for full-line and trailing comments.
+# 3. Any key-value pair NOT starting with "WINER_" will be automatically
+#    injected into the sandbox environment as an environment variable.
+#
+# ⚠️ WARNING: Content inside quotes is treated as a literal string.
+#    Shell expansions like '~' or '$HOME' are NOT supported.
+
+
+# [Target Application & Arguments]
+# Explicit override for the unique sandbox identifier.
+# Defaults to a short hash computed from the EXE path or WINEPREFIX.
+WINER_ID = "some-game"
+
+# Absolute host path to the target Windows executable file.
+WINER_EXE_PATH = "/mnt/Games/some-game/game.exe"
+
+# Command-line arguments passed to the target Windows executable.
+; WINER_EXE_ARGS = "-nofbo -high -windowed"
+
+
+# [Performance & Optimizations]
+# High-Performance Wrapper: 
+# "1" - Prepends 'gamemoderun' to lock high-performance profiles (requires Feral GameMode).
+# "0" - Disabled (default).
+WINER_GAMEMODE = "1"
+
+
+# [Directory Binds & Executable Penetration]
+# Read-Write Bind Mounts: Map host paths into the sandbox (comma-separated).
+# Supports two syntax formats:
+#   1. Minimal Mode: Direct host path (e.g., "/home/user/Downloads"). Maps to the exact same path.
+#   2. Redirect Mode: Colon-separated (e.g., "/host_dir:/container_dir"). Maps to a different location.
+; WINER_BIND = "/mnt/GameMods/some-game-mod-dir"
+
+# Read-Only Bind Mounts: High security, prevents sandbox modifications (comma-separated, same syntax).
+# 💡 NOTE: Custom Wine/Proton engines specified via WINER_WINE_PATH are automatically
+#    auto-mounted as read-only. You do NOT need to specify them here!
+; WINER_RO_BIND = ""
+
+# Wine Prefix
+WINEPREFIX = '/home/username/Games/prefixes/some-game_prefix'
+
+# Enable MangoHud
+MANGOHUD = "1"
+
