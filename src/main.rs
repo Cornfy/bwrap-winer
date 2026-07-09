@@ -251,6 +251,58 @@ fn get_unique_non_system_parent_paths(container_path: &std::path::Path) -> Vec<S
     vector_of_strings_representing_parent_paths
 }
 
+/// 探测引擎：执行确定性回溯算法，从指定的 Wine 二进制路径智能推导出运行器(Runner)的根目录结构。
+/// 能够自动兼容标准 Wine 目录布局 (bin/wine) 与高级 Proton 嵌套布局 (files/bin/wine)。
+fn resolve_wine_runner_root_directory_from_binary_path(
+    path_slice_representing_wine_binary: &std::path::Path
+) -> Option<PathBuf> {
+    let path_buf_representing_absolute_binary_path = std::fs::canonicalize(path_slice_representing_wine_binary).ok()?;
+    let path_slice_representing_binary_directory = path_buf_representing_absolute_binary_path.parent()?;
+    let string_representing_directory_name = path_slice_representing_binary_directory.file_name()?.to_string_lossy().to_lowercase();
+
+    // 应对如 "bin" 或 "bin-arm64" 结构
+    if string_representing_directory_name.starts_with("bin") {
+        let path_slice_representing_candidate_root = path_slice_representing_binary_directory.parent()?;
+        let string_representing_candidate_name = path_slice_representing_candidate_root.file_name()?.to_string_lossy().to_lowercase();
+        
+        // 进一步探测是否为 Proton 的 files 嵌套层
+        if string_representing_candidate_name == "files" {
+            Some(path_slice_representing_candidate_root.parent()?.to_path_buf())
+        } else {
+            Some(path_slice_representing_candidate_root.to_path_buf())
+        }
+    } else {
+        // 退化至极简扁平打包布局
+        Some(path_slice_representing_binary_directory.to_path_buf())
+    }
+}
+
+/// 安全探测：通过非独占性共享路径排除法 (Shared Path Exclusion)，判断推导出的 Runner Root 是否散落在系统的共享大目录中。
+fn determine_if_inferred_runner_root_is_scattered_shared_directory(
+    path_slice_representing_inferred_runner_root: &std::path::Path,
+    path_slice_representing_host_home_directory: &std::path::Path,
+) -> bool {
+    let string_representing_root_path = path_slice_representing_inferred_runner_root.to_string_lossy().into_owned();
+    
+    // 系统级公共共享容器名单（根目录等直接硬拦截，防止隔离逃逸）
+    let array_of_strings_representing_scattered_system_paths = [
+        "/", "/usr", "/usr/local", "/opt", "/mnt", "/media"
+    ];
+    
+    for string_slice_representing_scattered_path in array_of_strings_representing_scattered_system_paths {
+        if string_representing_root_path == string_slice_representing_scattered_path {
+            return true;
+        }
+    }
+
+    // 家目录本身也作为共享容器拒绝自动整体挂载
+    if path_slice_representing_inferred_runner_root == path_slice_representing_host_home_directory {
+        return true;
+    }
+
+    false
+}
+
 fn print_bwrap_winer_help_information() {
     println!("🛠  bwrap-winer - Zero-Flags Transparent Wine Sandbox Proxy");
     println!("===============================================================");
@@ -555,6 +607,7 @@ fn resolve_target_executable_and_validate(
 fn collect_mount_specifications(
     sandbox_context_representing_runtime_environment: &SandboxContext,
     target_specification_representing_validated_execution: &TargetSpecification,
+    option_representing_cli_custom_wine_path: &Option<String>,
 ) -> Vec<MountSpecification> {
     let mut vector_of_mount_specifications: Vec<MountSpecification> = Vec::new();
     let pyramid = &sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers;
@@ -596,6 +649,37 @@ fn collect_mount_specifications(
             boolean_flag_indicating_readonly: false,
             boolean_flag_indicating_try_only: false,
         });
+    }
+
+    // Custom Wine Engine Auto-Mount Injection
+    let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
+        string_representing_cli_wine_path.clone()
+    } else {
+        pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine")
+    };
+
+    if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
+        let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
+        
+        if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
+            let boolean_flag_indicating_scattered_shared_directory = determine_if_inferred_runner_root_is_scattered_shared_directory(
+                &path_buf_representing_inferred_runner_root,
+                &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory
+            );
+
+            if boolean_flag_indicating_scattered_shared_directory {
+                eprintln!("[bwrap-winer] WARNING: The resolved Wine Runner Root ({:?}) is a scattered shared system directory.", path_buf_representing_inferred_runner_root);
+                eprintln!("[bwrap-winer] For security, auto-mounting is disabled for shared paths to prevent sandbox escape.");
+                eprintln!("[bwrap-winer] Please use a self-contained directory (e.g., /opt/wine-version/) or manually use WINER_RO_BIND.");
+            } else {
+                vector_of_mount_specifications.push(MountSpecification {
+                    path_buf_representing_host_source: path_buf_representing_inferred_runner_root.clone(),
+                    path_buf_representing_container_destination: path_buf_representing_inferred_runner_root,
+                    boolean_flag_indicating_readonly: true,
+                    boolean_flag_indicating_try_only: false,
+                });
+            }
+        }
     }
 
     let string_representing_custom_binds_value = pyramid.resolve_configuration_value("WINER_BIND", "");
@@ -901,22 +985,26 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine")
     };
 
-    // LD_LIBRARY_PATH Magic Sniffing
+    // LD_LIBRARY_PATH Intelligent Sniffing for Custom Engine Packages
     if pyramid.resolve_configuration_value("LD_LIBRARY_PATH", "").is_empty() {
-        let string_representing_wine_path_lowercase = string_representing_custom_wine_binary_path.to_lowercase();
-        if string_representing_wine_path_lowercase.ends_with("/wine") || string_representing_wine_path_lowercase.ends_with("/wine64") {
-            let path_buf_representing_absolute_wine_path = std::fs::canonicalize(&string_representing_custom_wine_binary_path)
-                .unwrap_or_else(|_| PathBuf::from(&string_representing_custom_wine_binary_path));
-            if let Some(path_slice_representing_bin_directory) = path_buf_representing_absolute_wine_path.parent() {
-                if let Some(path_slice_representing_runner_root_directory) = path_slice_representing_bin_directory.parent() {
-                    let string_representing_runner_root_path = path_slice_representing_runner_root_directory.to_string_lossy().into_owned();
-                    let string_representing_inferred_ld_library_path = format!(
-                        "{}/lib:{}/lib64:{}/lib/wine/x86_64-unix:{}/lib32/wine/x86_64-unix:{}/lib64/wine/x86_64-unix",
-                        string_representing_runner_root_path, string_representing_runner_root_path, string_representing_runner_root_path, string_representing_runner_root_path, string_representing_runner_root_path
-                    );
+        if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
+            let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
+            if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
+                let mut vector_of_strings_representing_inferred_library_paths = Vec::new();
+                let array_of_strings_representing_potential_library_subdirectories = ["lib", "lib64", "files/lib", "files/lib64"];
+                
+                for string_slice_representing_library_subdirectory in array_of_strings_representing_potential_library_subdirectories {
+                    let path_buf_representing_potential_library_path = path_buf_representing_inferred_runner_root.join(string_slice_representing_library_subdirectory);
+                    if path_buf_representing_potential_library_path.exists() {
+                        vector_of_strings_representing_inferred_library_paths.push(path_buf_representing_potential_library_path.to_string_lossy().into_owned());
+                    }
+                }
+
+                if !vector_of_strings_representing_inferred_library_paths.is_empty() {
+                    let string_representing_joined_ld_library_path = vector_of_strings_representing_inferred_library_paths.join(":");
                     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
                     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("LD_LIBRARY_PATH"));
-                    vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_inferred_ld_library_path);
+                    vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_joined_ld_library_path);
                 }
             }
         }
@@ -1028,6 +1116,7 @@ fn main() {
     let vector_of_mount_specifications = collect_mount_specifications(
         &sandbox_context_representing_runtime_environment,
         &target_specification_representing_validated_execution,
+        &option_representing_cli_custom_wine_path,
     );
 
     let (vector_of_strings_representing_sorted_directories_to_create, vector_of_verified_mount_specifications) = 
