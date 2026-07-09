@@ -1140,7 +1140,13 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_custom_wine_binary_path);
     }
     
-    vector_of_strings_representing_sandbox_inner_command_execution.push(target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file);
+    // 如果是物理文件（免疫目录切换干扰），使用绝对路径；如果是虚拟裸命令（如 cmd），使用 raw 裸词。
+    let string_representing_final_target_execution_path = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
+        target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.to_string_lossy().into_owned()
+    } else {
+        target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file.clone()
+    };
+    vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_final_target_execution_path);
     
     for string_slice_representing_arg in pyramid.resolve_configuration_value("WINER_EXE_ARGS", "").split_whitespace() {
         if !string_slice_representing_arg.is_empty() {
