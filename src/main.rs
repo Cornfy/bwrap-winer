@@ -12,6 +12,7 @@ struct MountSpecification {
     path_buf_representing_container_destination: PathBuf,
     boolean_flag_indicating_readonly: bool,
     boolean_flag_indicating_try_only: bool,
+    boolean_flag_indicating_host_directory_creation_allowed: bool,
 }
 
 /// 配置金字塔实体：安全封装 3 个维度的哈希表，并提供便捷的级联查询接口。
@@ -57,7 +58,6 @@ struct TargetSpecification {
 // ==========================================
 
 /// 使用 64 位 FNV-1a 非加密哈希算法对输入的字符串进行哈希处理。
-/// 这是一个自包含的高效算法，用于避免引入外部 sha2/hex 依赖。
 fn calculate_fnv1a_64_bit_hash_of_string(string_slice_to_be_hashed: &str) -> String {
     let mut unsigned_64_bit_hash_value: u64 = 0xcbf29ce484222325;
     for byte_of_character_in_string in string_slice_to_be_hashed.as_bytes() {
@@ -99,6 +99,35 @@ fn generate_slug_from_absolute_filesystem_path(path_slice_to_be_slugified: &std:
     }
 
     string_representing_sanitized_slug.trim_matches('-').to_string()
+}
+
+/// 绝对路径清洗器：将各种来源的相对路径强制转化为宿主机绝对路径，免疫执行时工作目录切换导致的越权或找不到文件漏洞。
+/// 支持自动从系统 PATH 环境变量中搜索裸命令（如 "wine"），将其解析为真实的物理绝对路径。
+fn fs_absolute_path_secure(path_slice_to_be_secured: &std::path::Path) -> PathBuf {
+    if let Ok(path_buf_representing_canonicalized) = std::fs::canonicalize(path_slice_to_be_secured) {
+        path_buf_representing_canonicalized
+    } else if path_slice_to_be_secured.is_absolute() {
+        path_slice_to_be_secured.to_path_buf()
+    } else {
+        let string_representing_path = path_slice_to_be_secured.to_string_lossy();
+        // 如果是裸命令（不含斜杠），尝试在系统 PATH 中进行物理定位
+        if !string_representing_path.contains('/') && !string_representing_path.contains('\\') {
+            if let Ok(string_representing_env_path) = std::env::var("PATH") {
+                for string_slice_representing_directory in string_representing_env_path.split(':') {
+                    let path_buf_representing_candidate = std::path::Path::new(string_slice_representing_directory).join(path_slice_to_be_secured);
+                    if let Ok(path_buf_representing_canonicalized) = std::fs::canonicalize(&path_buf_representing_candidate) {
+                        return path_buf_representing_canonicalized;
+                    }
+                }
+            }
+        }
+        // 最终保底：拼接当前工作目录 CWD
+        if let Ok(path_buf_representing_current_working_directory) = std::env::current_dir() {
+            path_buf_representing_current_working_directory.join(path_slice_to_be_secured)
+        } else {
+            path_slice_to_be_secured.to_path_buf()
+        }
+    }
 }
 
 /// 纯标准库实现的高效扁平 TOML/配置文件解析器，支持过滤整行注释、行尾注释及剔除包裹引号。
@@ -153,7 +182,7 @@ fn parse_simple_flat_toml_file_into_hash_map(
     hash_map_representing_configuration_keys_and_values
 }
 
-/// 5 层金字塔链式覆盖器：依次从 环境变量 -> 局部沙箱运行时配置 -> 个人 XDG 用户专属沙箱配置 -> 全局默认配置 -> 硬编码保底 级联查询目标值。
+/// 5 层金字塔链式覆盖器：级联查询目标值
 fn resolve_configuration_value_from_hierarchical_sources(
     string_slice_representing_variable_key: &str,
     hash_map_representing_sandbox_local_data_config: &std::collections::HashMap<String, String>,
@@ -256,7 +285,7 @@ fn get_unique_non_system_parent_paths(container_path: &std::path::Path) -> Vec<S
 fn resolve_wine_runner_root_directory_from_binary_path(
     path_slice_representing_wine_binary: &std::path::Path
 ) -> Option<PathBuf> {
-    let path_buf_representing_absolute_binary_path = std::fs::canonicalize(path_slice_representing_wine_binary).ok()?;
+    let path_buf_representing_absolute_binary_path = fs_absolute_path_secure(path_slice_representing_wine_binary);
     let path_slice_representing_binary_directory = path_buf_representing_absolute_binary_path.parent()?;
     let string_representing_directory_name = path_slice_representing_binary_directory.file_name()?.to_string_lossy().to_lowercase();
 
@@ -485,20 +514,17 @@ fn resolve_sandbox_identity(
             "",
         );
         if !string_representing_wine_prefix_resolved_value.is_empty() {
-            let path_buf_representing_explicit_wine_prefix = std::fs::canonicalize(&string_representing_wine_prefix_resolved_value)
-                .unwrap_or_else(|_| PathBuf::from(&string_representing_wine_prefix_resolved_value));
+            let path_buf_representing_explicit_wine_prefix = fs_absolute_path_secure(std::path::Path::new(&string_representing_wine_prefix_resolved_value));
             let string_representing_prefix_slug = generate_slug_from_absolute_filesystem_path(&path_buf_representing_explicit_wine_prefix);
             let string_representing_prefix_hash = calculate_fnv1a_64_bit_hash_of_string(&path_buf_representing_explicit_wine_prefix.to_string_lossy());
             format!("{}-{}", string_representing_prefix_slug, string_representing_prefix_hash)
         } else if let Some(string_representing_known_exe) = option_representing_raw_target_executable {
-            let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(string_representing_known_exe)
-                .unwrap_or_else(|_| PathBuf::from(string_representing_known_exe));
+            let path_buf_representing_absolute_path_to_target_executable_file = fs_absolute_path_secure(std::path::Path::new(string_representing_known_exe));
             let string_representing_executable_slug = generate_slug_from_absolute_filesystem_path(&path_buf_representing_absolute_path_to_target_executable_file);
             let string_representing_executable_hash = calculate_fnv1a_64_bit_hash_of_string(&path_buf_representing_absolute_path_to_target_executable_file.to_string_lossy());
             format!("{}-{}", string_representing_executable_slug, string_representing_executable_hash)
         } else {
             eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable or WINER_ID not specified.");
-            eprintln!("[bwrap-winer] Usage: WINER_ID=myapp bwrap-winer OR bwrap-winer /path/to/exe");
             std::process::exit(1);
         }
     }
@@ -540,8 +566,9 @@ fn resolve_target_executable_and_validate(
     option_representing_raw_target_executable: Option<String>,
     vector_of_strings_representing_remaining_cli_arguments: Vec<String>,
     sandbox_context_representing_runtime_environment: &SandboxContext,
+    option_representing_cli_custom_wine_path: &Option<String>,
 ) -> TargetSpecification {
-    let string_representing_raw_path_to_target_executable_file = match option_representing_raw_target_executable {
+    let mut string_representing_raw_path_to_target_executable_file = match option_representing_raw_target_executable {
         Some(string_representing_known_exe) => string_representing_known_exe,
         None => {
             let string_representing_resolved_exe_path = sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_EXE_PATH", "");
@@ -553,32 +580,69 @@ fn resolve_target_executable_and_validate(
         }
     };
 
-    let array_of_strings_representing_wine_builtins = [
-        "winecfg", "regedit", "control", "uninstaller", "wineconsole", 
-        "cmd", "explorer", "notepad", "taskmgr", "msiexec"
-    ];
+    // Custom Wine Engine Auto-Mount Injection
+    let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
+        string_representing_cli_wine_path.clone()
+    } else {
+        sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_WINE_PATH", "wine")
+    };
 
-    let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
+    // 第一步：运行器本地重定向 (Runner-Local Redirect)
+    // 如果用户输入的是裸命令（如 "winecfg"），优先去指定的 Wine 引擎同级目录下探寻物理软链接。
+    if !string_representing_raw_path_to_target_executable_file.contains('/') && !string_representing_raw_path_to_target_executable_file.contains('\\') {
+        let path_buf_representing_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
+        if let Some(path_slice_representing_engine_directory) = path_buf_representing_engine_path.parent() {
+            let path_buf_representing_potential_local_target = path_slice_representing_engine_directory.join(&string_representing_raw_path_to_target_executable_file);
+            if path_buf_representing_potential_local_target.exists() {
+                string_representing_raw_path_to_target_executable_file = path_buf_representing_potential_local_target.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    let path_buf_representing_absolute_path_to_target_executable_file = fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_path_to_target_executable_file));
+
+    // 第二步：物理等价性验证 (Identity Check)
+    // 必须首先对引擎路径进行 PATH 安全清洗，然后再送入规范化比对，否则会导致裸命令 "wine" 比对失败
+    let mut boolean_flag_indicating_is_wine_multicall_symlink = false;
+    let path_buf_representing_secured_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
+
+    if let (Ok(path_buf_representing_real_target), Ok(path_buf_representing_real_engine)) = (
+        std::fs::canonicalize(&path_buf_representing_absolute_path_to_target_executable_file),
+        std::fs::canonicalize(&path_buf_representing_secured_engine_path)
+    ) {
+        if path_buf_representing_real_target == path_buf_representing_real_engine {
+            boolean_flag_indicating_is_wine_multicall_symlink = true;
+        }
+    }
+
     let string_representing_target_executable_lowercase = string_representing_raw_path_to_target_executable_file.to_lowercase();
-    let boolean_flag_indicating_is_builtin = array_of_strings_representing_wine_builtins.contains(&string_representing_raw_path_to_target_executable_file.as_str());
+    let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
 
-    if string_representing_target_executable_lowercase.ends_with(".exe") 
+    // 第三步：智能路由与拦截分流
+    if boolean_flag_indicating_is_wine_multicall_symlink {
+        // 分支 A：它是指向引擎的软链接（如 /usr/bin/winecfg）。
+        // 行为：直接原生执行，Wine 会根据 argv[0] 多路复用，绝对不需要前置补齐 `wine`。
+        boolean_flag_indicating_wine_prefix_prepending_needed = false;
+    } else if string_representing_target_executable_lowercase.ends_with(".exe") 
         || string_representing_target_executable_lowercase.ends_with(".bat")
         || string_representing_target_executable_lowercase.ends_with(".cmd") 
         || string_representing_target_executable_lowercase.ends_with(".msi") 
         || string_representing_target_executable_lowercase.ends_with(".reg")
-        || boolean_flag_indicating_is_builtin
     {
+        // 分支 B：明确的 Windows 执行文件格式。
+        // 行为：前置补齐 `wine` 唤起。
+        boolean_flag_indicating_wine_prefix_prepending_needed = true;
+    } else if !string_representing_raw_path_to_target_executable_file.contains('/') && !string_representing_raw_path_to_target_executable_file.contains('\\') {
+        // 分支 C：虚拟裸命令（如 "cmd", "explorer"），在物理宿主机上不存在，也无法重定向。
+        // 行为：这是对 Wine 虚拟 C 盘的指令调用，必须前置补齐 `wine` 唤起。
         boolean_flag_indicating_wine_prefix_prepending_needed = true;
     }
 
-    let path_buf_representing_absolute_path_to_target_executable_file = std::fs::canonicalize(&string_representing_raw_path_to_target_executable_file)
-        .unwrap_or_else(|_| PathBuf::from(&string_representing_raw_path_to_target_executable_file));
-
-    // 启发式探测拦截：如果包含路径符号，进行物理检查；若是内置指令，放行且无视不存在报错
-    if string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\') {
+    // 第四步：极简安全拦截 (只拦截非同源的 Linux ELF)
+    // 只有在“非软链接引擎”、“且有物理路径”的情况下，才进行 ELF 侦测，完美避开软链接误杀。
+    if !boolean_flag_indicating_is_wine_multicall_symlink && (string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\')) {
         if !path_buf_representing_absolute_path_to_target_executable_file.exists() {
-            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable file not found -> {}", string_representing_raw_path_to_target_executable_file);
+            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable file not found -> {:?}", path_buf_representing_absolute_path_to_target_executable_file);
             std::process::exit(1);
         }
         
@@ -586,14 +650,12 @@ fn resolve_target_executable_and_validate(
             let mut array_of_bytes_representing_magic_number = [0u8; 4];
             if file_representing_target_executable.read(&mut array_of_bytes_representing_magic_number).is_ok() {
                 if array_of_bytes_representing_magic_number == [0x7f, 0x45, 0x4c, 0x46] {
-                    eprintln!("[bwrap-winer] SECURITY BLOCK: '{}' is a native Linux ELF binary.", string_representing_raw_path_to_target_executable_file);
+                    eprintln!("[bwrap-winer] SECURITY BLOCK: '{:?}' is a native Linux ELF binary.", path_buf_representing_absolute_path_to_target_executable_file);
                     eprintln!("[bwrap-winer] This tool is strictly a Wine sandbox proxy. Refusing to run native Linux programs.");
                     std::process::exit(1);
                 }
             }
         }
-    } else if boolean_flag_indicating_is_builtin {
-        // 内置指令白名单放行，彻底免疫 ELF 误伤拦截，并免除文件存在性物理检测。
     }
 
     TargetSpecification {
@@ -622,6 +684,7 @@ fn collect_mount_specifications(
             path_buf_representing_container_destination: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
             boolean_flag_indicating_readonly: true,
             boolean_flag_indicating_try_only: false,
+            boolean_flag_indicating_host_directory_creation_allowed: false,
         });
     } else {
         for _ in 0..unsigned_integer_representing_penetrate_depth {
@@ -636,22 +699,22 @@ fn collect_mount_specifications(
             path_buf_representing_container_destination: path_buf_representing_current_penetrated_directory.clone(),
             boolean_flag_indicating_readonly: false,
             boolean_flag_indicating_try_only: false,
+            boolean_flag_indicating_host_directory_creation_allowed: false,
         });
     }
 
     let string_representing_wine_prefix_resolved_value = pyramid.resolve_configuration_value("WINEPREFIX", "");
     if !string_representing_wine_prefix_resolved_value.is_empty() {
-        let path_buf_representing_custom_wine_prefix = std::fs::canonicalize(&string_representing_wine_prefix_resolved_value)
-            .unwrap_or_else(|_| PathBuf::from(&string_representing_wine_prefix_resolved_value));
+        let path_buf_representing_custom_wine_prefix = fs_absolute_path_secure(std::path::Path::new(&string_representing_wine_prefix_resolved_value));
         vector_of_mount_specifications.push(MountSpecification {
             path_buf_representing_host_source: path_buf_representing_custom_wine_prefix.clone(),
             path_buf_representing_container_destination: path_buf_representing_custom_wine_prefix,
             boolean_flag_indicating_readonly: false,
             boolean_flag_indicating_try_only: false,
+            boolean_flag_indicating_host_directory_creation_allowed: true, // Only WINEPREFIX gets this privilege safely
         });
     }
 
-    // Custom Wine Engine Auto-Mount Injection
     let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
         string_representing_cli_wine_path.clone()
     } else {
@@ -659,7 +722,7 @@ fn collect_mount_specifications(
     };
 
     if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
-        let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
+        let path_buf_representing_wine_binary = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
         
         if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
             let boolean_flag_indicating_scattered_shared_directory = determine_if_inferred_runner_root_is_scattered_shared_directory(
@@ -670,13 +733,13 @@ fn collect_mount_specifications(
             if boolean_flag_indicating_scattered_shared_directory {
                 eprintln!("[bwrap-winer] WARNING: The resolved Wine Runner Root ({:?}) is a scattered shared system directory.", path_buf_representing_inferred_runner_root);
                 eprintln!("[bwrap-winer] For security, auto-mounting is disabled for shared paths to prevent sandbox escape.");
-                eprintln!("[bwrap-winer] Please use a self-contained directory (e.g., /opt/wine-version/) or manually use WINER_RO_BIND.");
             } else {
                 vector_of_mount_specifications.push(MountSpecification {
                     path_buf_representing_host_source: path_buf_representing_inferred_runner_root.clone(),
                     path_buf_representing_container_destination: path_buf_representing_inferred_runner_root,
                     boolean_flag_indicating_readonly: true,
                     boolean_flag_indicating_try_only: false,
+                    boolean_flag_indicating_host_directory_creation_allowed: false,
                 });
             }
         }
@@ -684,43 +747,73 @@ fn collect_mount_specifications(
 
     let string_representing_custom_binds_value = pyramid.resolve_configuration_value("WINER_BIND", "");
     if !string_representing_custom_binds_value.is_empty() {
-        for string_slice_representing_bind_pair in string_representing_custom_binds_value.split(',') {
-            if !string_slice_representing_bind_pair.is_empty() {
-                let vector_of_slices_representing_pair_split: Vec<&str> = string_slice_representing_bind_pair.split(':').collect();
-                let string_representing_host_path = vector_of_slices_representing_pair_split[0].to_string();
-                let string_representing_container_path = if vector_of_slices_representing_pair_split.len() > 1 {
-                    vector_of_slices_representing_pair_split[1].to_string()
-                } else {
-                    string_representing_host_path.clone()
-                };
-                vector_of_mount_specifications.push(MountSpecification {
-                    path_buf_representing_host_source: PathBuf::from(string_representing_host_path),
-                    path_buf_representing_container_destination: PathBuf::from(string_representing_container_path),
-                    boolean_flag_indicating_readonly: false,
-                    boolean_flag_indicating_try_only: false,
-                });
+        for string_slice_representing_raw_bind_pair in string_representing_custom_binds_value.split(',') {
+            let string_slice_representing_trimmed_bind_pair = string_slice_representing_raw_bind_pair.trim();
+            if string_slice_representing_trimmed_bind_pair.is_empty() {
+                continue;
             }
+            let vector_of_slices_representing_pair_split: Vec<&str> = string_slice_representing_trimmed_bind_pair.split(':').collect();
+            let string_representing_raw_host_path = vector_of_slices_representing_pair_split[0].trim().to_string();
+
+            if string_representing_raw_host_path.is_empty() {
+                eprintln!("[bwrap-winer] CRITICAL ERROR: Invalid empty host path detected in WINER_BIND configuration.");
+                std::process::exit(1);
+            }
+
+            let string_representing_raw_container_path = if vector_of_slices_representing_pair_split.len() > 1 {
+                let string_slice_representing_trimmed_container = vector_of_slices_representing_pair_split[1].trim();
+                if string_slice_representing_trimmed_container.is_empty() {
+                    eprintln!("[bwrap-winer] CRITICAL ERROR: Invalid empty container path detected in WINER_BIND configuration.");
+                    std::process::exit(1);
+                }
+                string_slice_representing_trimmed_container.to_string()
+            } else {
+                string_representing_raw_host_path.clone()
+            };
+
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_host_path)),
+                path_buf_representing_container_destination: fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_container_path)),
+                boolean_flag_indicating_readonly: false,
+                boolean_flag_indicating_try_only: false,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
+            });
         }
     }
 
     let string_representing_custom_ro_binds_value = pyramid.resolve_configuration_value("WINER_RO_BIND", "");
     if !string_representing_custom_ro_binds_value.is_empty() {
-        for string_slice_representing_ro_bind_pair in string_representing_custom_ro_binds_value.split(',') {
-            if !string_slice_representing_ro_bind_pair.is_empty() {
-                let vector_of_slices_representing_pair_split: Vec<&str> = string_slice_representing_ro_bind_pair.split(':').collect();
-                let string_representing_host_path = vector_of_slices_representing_pair_split[0].to_string();
-                let string_representing_container_path = if vector_of_slices_representing_pair_split.len() > 1 {
-                    vector_of_slices_representing_pair_split[1].to_string()
-                } else {
-                    string_representing_host_path.clone()
-                };
-                vector_of_mount_specifications.push(MountSpecification {
-                    path_buf_representing_host_source: PathBuf::from(string_representing_host_path),
-                    path_buf_representing_container_destination: PathBuf::from(string_representing_container_path),
-                    boolean_flag_indicating_readonly: true,
-                    boolean_flag_indicating_try_only: false,
-                });
+        for string_slice_representing_raw_ro_bind_pair in string_representing_custom_ro_binds_value.split(',') {
+            let string_slice_representing_trimmed_ro_bind_pair = string_slice_representing_raw_ro_bind_pair.trim();
+            if string_slice_representing_trimmed_ro_bind_pair.is_empty() {
+                continue;
             }
+            let vector_of_slices_representing_pair_split: Vec<&str> = string_slice_representing_trimmed_ro_bind_pair.split(':').collect();
+            let string_representing_raw_host_path = vector_of_slices_representing_pair_split[0].trim().to_string();
+
+            if string_representing_raw_host_path.is_empty() {
+                eprintln!("[bwrap-winer] CRITICAL ERROR: Invalid empty host path detected in WINER_RO_BIND configuration.");
+                std::process::exit(1);
+            }
+
+            let string_representing_raw_container_path = if vector_of_slices_representing_pair_split.len() > 1 {
+                let string_slice_representing_trimmed_container = vector_of_slices_representing_pair_split[1].trim();
+                if string_slice_representing_trimmed_container.is_empty() {
+                    eprintln!("[bwrap-winer] CRITICAL ERROR: Invalid empty container path detected in WINER_RO_BIND configuration.");
+                    std::process::exit(1);
+                }
+                string_slice_representing_trimmed_container.to_string()
+            } else {
+                string_representing_raw_host_path.clone()
+            };
+
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_host_path)),
+                path_buf_representing_container_destination: fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_container_path)),
+                boolean_flag_indicating_readonly: true,
+                boolean_flag_indicating_try_only: false,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
+            });
         }
     }
 
@@ -732,6 +825,7 @@ fn collect_mount_specifications(
                 path_buf_representing_container_destination: path_buf_representing_wayland_socket,
                 boolean_flag_indicating_readonly: false,
                 boolean_flag_indicating_try_only: true,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
             });
         }
     }
@@ -741,6 +835,7 @@ fn collect_mount_specifications(
         path_buf_representing_container_destination: PathBuf::from("/tmp/.X11-unix"),
         boolean_flag_indicating_readonly: false,
         boolean_flag_indicating_try_only: true,
+        boolean_flag_indicating_host_directory_creation_allowed: false,
     });
 
     if let Ok(string_representing_xdg_runtime_directory_value) = std::env::var("XDG_RUNTIME_DIR") {
@@ -753,6 +848,7 @@ fn collect_mount_specifications(
                 path_buf_representing_container_destination: path_buf_representing_socket,
                 boolean_flag_indicating_readonly: false,
                 boolean_flag_indicating_try_only: true,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
             });
         }
     }
@@ -766,6 +862,7 @@ fn collect_mount_specifications(
             path_buf_representing_container_destination: PathBuf::from(string_slice_representing_path),
             boolean_flag_indicating_readonly: true,
             boolean_flag_indicating_try_only: true,
+            boolean_flag_indicating_host_directory_creation_allowed: false,
         });
     }
 
@@ -775,6 +872,7 @@ fn collect_mount_specifications(
         path_buf_representing_container_destination: path_buf_representing_user_fonts_directory,
         boolean_flag_indicating_readonly: true,
         boolean_flag_indicating_try_only: true,
+        boolean_flag_indicating_host_directory_creation_allowed: false,
     });
 
     let array_of_strings_representing_dns_and_resolved_paths = [
@@ -786,6 +884,7 @@ fn collect_mount_specifications(
             path_buf_representing_container_destination: PathBuf::from(string_slice_representing_dns_path),
             boolean_flag_indicating_readonly: true,
             boolean_flag_indicating_try_only: true,
+            boolean_flag_indicating_host_directory_creation_allowed: false,
         });
     }
 
@@ -811,17 +910,22 @@ fn resolve_and_heal_mounts(
             }
             vector_of_verified_mount_specifications.push(mount_spec);
         } else if !mount_spec.boolean_flag_indicating_try_only {
-            let _ = std::fs::create_dir_all(&mount_spec.path_buf_representing_host_source);
-            if mount_spec.path_buf_representing_host_source.exists() {
-                ensure_mount_point_exists_in_sandbox_home(
-                    &mount_spec.path_buf_representing_host_source,
-                    &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory,
-                    &sandbox_context_representing_runtime_environment.path_buf_representing_sandbox_home_directory,
-                );
-                for string_representing_parent_dir in get_unique_non_system_parent_paths(&mount_spec.path_buf_representing_container_destination) {
-                    hash_set_representing_all_needed_container_directories.insert(string_representing_parent_dir);
+            if mount_spec.boolean_flag_indicating_host_directory_creation_allowed {
+                let _ = std::fs::create_dir_all(&mount_spec.path_buf_representing_host_source);
+                if mount_spec.path_buf_representing_host_source.exists() {
+                    ensure_mount_point_exists_in_sandbox_home(
+                        &mount_spec.path_buf_representing_host_source,
+                        &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory,
+                        &sandbox_context_representing_runtime_environment.path_buf_representing_sandbox_home_directory,
+                    );
+                    for string_representing_parent_dir in get_unique_non_system_parent_paths(&mount_spec.path_buf_representing_container_destination) {
+                        hash_set_representing_all_needed_container_directories.insert(string_representing_parent_dir);
+                    }
+                    vector_of_verified_mount_specifications.push(mount_spec);
                 }
-                vector_of_verified_mount_specifications.push(mount_spec);
+            } else {
+                eprintln!("[bwrap-winer] CRITICAL ERROR: Required host mount source does not exist and auto-creation is strictly disabled to prevent pollution: {:?}", mount_spec.path_buf_representing_host_source);
+                std::process::exit(1);
             }
         }
     }
@@ -1111,6 +1215,7 @@ fn main() {
         option_representing_raw_target_executable,
         vector_of_strings_representing_remaining_cli_arguments,
         &sandbox_context_representing_runtime_environment,
+        &option_representing_cli_custom_wine_path, // 新增：透传自定义引擎配置用于物理比对
     );
 
     let vector_of_mount_specifications = collect_mount_specifications(
