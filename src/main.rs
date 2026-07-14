@@ -101,20 +101,50 @@ fn generate_slug_from_absolute_filesystem_path(path_slice_to_be_slugified: &std:
     string_representing_sanitized_slug.trim_matches('-').to_string()
 }
 
+/// 内存级波浪号展开器：在配置读取的最前端执行统一替换，确保流入程序内存的配置数据 100% 绝对化。
+fn expand_tilde_in_configuration_value(string_representing_raw_value: String) -> String {
+    if string_representing_raw_value == "~" {
+        if let Some(os_str_representing_home) = std::env::var_os("HOME") {
+            return os_str_representing_home.to_string_lossy().into_owned();
+        }
+    } else if string_representing_raw_value.starts_with("~/") {
+        if let Some(os_str_representing_home) = std::env::var_os("HOME") {
+            let string_representing_home = os_str_representing_home.to_string_lossy().into_owned();
+            return format!("{}{}", string_representing_home, &string_representing_raw_value[1..]);
+        }
+    }
+    string_representing_raw_value
+}
+
 /// 绝对路径清洗器：将各种来源的相对路径强制转化为宿主机绝对路径，免疫执行时工作目录切换导致的越权或找不到文件漏洞。
-/// 支持自动从系统 PATH 环境变量中搜索裸命令（如 "wine"），将其解析为真实的物理绝对路径。
+/// 支持波浪号安全代换与 PATH 环境变量物理搜寻，阻断美元符($)变量展开，防止 Shell 注入。
 fn fs_absolute_path_secure(path_slice_to_be_secured: &std::path::Path) -> PathBuf {
-    if let Ok(path_buf_representing_canonicalized) = std::fs::canonicalize(path_slice_to_be_secured) {
+    let mut path_buf_representing_resolved_tilde = path_slice_to_be_secured.to_path_buf();
+
+    // 极简波浪号安全自愈器：只代换孤立的 "~" 和标准 "~/"，过滤 "~username" 等非法扩散
+    if path_slice_to_be_secured.starts_with("~") {
+        if let Some(os_str_representing_home) = std::env::var_os("HOME") {
+            let path_slice_representing_home = std::path::Path::new(&os_str_representing_home);
+            if path_slice_to_be_secured == std::path::Path::new("~") {
+                path_buf_representing_resolved_tilde = path_slice_representing_home.to_path_buf();
+            } else if let Ok(path_slice_representing_relative) = path_slice_to_be_secured.strip_prefix("~/") {
+                path_buf_representing_resolved_tilde = path_slice_representing_home.join(path_slice_representing_relative);
+            }
+        }
+    }
+
+    // 注意：必须检测代换后的 path_buf，因为 "~/" 展开后才具备真正的 absolute 属性
+    if let Ok(path_buf_representing_canonicalized) = std::fs::canonicalize(&path_buf_representing_resolved_tilde) {
         path_buf_representing_canonicalized
-    } else if path_slice_to_be_secured.is_absolute() {
-        path_slice_to_be_secured.to_path_buf()
+    } else if path_buf_representing_resolved_tilde.is_absolute() {
+        path_buf_representing_resolved_tilde
     } else {
-        let string_representing_path = path_slice_to_be_secured.to_string_lossy();
+        let string_representing_path = path_buf_representing_resolved_tilde.to_string_lossy();
         // 如果是裸命令（不含斜杠），尝试在系统 PATH 中进行物理定位
         if !string_representing_path.contains('/') && !string_representing_path.contains('\\') {
             if let Ok(string_representing_env_path) = std::env::var("PATH") {
                 for string_slice_representing_directory in string_representing_env_path.split(':') {
-                    let path_buf_representing_candidate = std::path::Path::new(string_slice_representing_directory).join(path_slice_to_be_secured);
+                    let path_buf_representing_candidate = std::path::Path::new(string_slice_representing_directory).join(&path_buf_representing_resolved_tilde);
                     if let Ok(path_buf_representing_canonicalized) = std::fs::canonicalize(&path_buf_representing_candidate) {
                         return path_buf_representing_canonicalized;
                     }
@@ -123,9 +153,9 @@ fn fs_absolute_path_secure(path_slice_to_be_secured: &std::path::Path) -> PathBu
         }
         // 最终保底：拼接当前工作目录 CWD
         if let Ok(path_buf_representing_current_working_directory) = std::env::current_dir() {
-            path_buf_representing_current_working_directory.join(path_slice_to_be_secured)
+            path_buf_representing_current_working_directory.join(&path_buf_representing_resolved_tilde)
         } else {
-            path_slice_to_be_secured.to_path_buf()
+            path_buf_representing_resolved_tilde
         }
     }
 }
@@ -182,7 +212,7 @@ fn parse_simple_flat_toml_file_into_hash_map(
     hash_map_representing_configuration_keys_and_values
 }
 
-/// 5 层金字塔链式覆盖器：级联查询目标值
+/// 5 层金字塔链式覆盖器：级联查询目标值。
 fn resolve_configuration_value_from_hierarchical_sources(
     string_slice_representing_variable_key: &str,
     hash_map_representing_sandbox_local_data_config: &std::collections::HashMap<String, String>,
@@ -192,22 +222,22 @@ fn resolve_configuration_value_from_hierarchical_sources(
 ) -> String {
     // 1. 环境变量 (最高优先级)
     if let Ok(string_representing_env_value) = std::env::var(string_slice_representing_variable_key) {
-        return string_representing_env_value;
+        return expand_tilde_in_configuration_value(string_representing_env_value);
     }
     // 2. 局部沙箱运行时状态配置 (XDG_DATA_HOME/sandboxes/[ID]/winer_meta.toml)
     if let Some(string_representing_sandbox_value) = hash_map_representing_sandbox_local_data_config.get(string_slice_representing_variable_key) {
-        return string_representing_sandbox_value.clone();
+        return expand_tilde_in_configuration_value(string_representing_sandbox_value.clone());
     }
     // 3. 用户个人专属沙箱配置 (XDG_CONFIG_HOME/bwrap-winer/[ID].toml)
     if let Some(string_representing_sandbox_user_value) = hash_map_representing_sandbox_specific_user_config.get(string_slice_representing_variable_key) {
-        return string_representing_sandbox_user_value.clone();
+        return expand_tilde_in_configuration_value(string_representing_sandbox_user_value.clone());
     }
     // 4. 全局通用配置 (XDG_CONFIG_HOME/bwrap-winer/config.toml)
     if let Some(string_representing_global_value) = hash_map_representing_global_config.get(string_slice_representing_variable_key) {
-        return string_representing_global_value.clone();
+        return expand_tilde_in_configuration_value(string_representing_global_value.clone());
     }
     // 5. 硬编码保底 (最低优先级)
-    string_slice_representing_hardcoded_default_value.to_string()
+    expand_tilde_in_configuration_value(string_slice_representing_hardcoded_default_value.to_string())
 }
 
 /// 宿主家目录自愈投影：使用 !is_dir() 识别套接字和普通文件，仅在隔离的沙箱 sandbox_home 对应结构下执行物理自愈创建父目录，确保挂载桩存在。
@@ -1078,22 +1108,30 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
 
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--unsetenv"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("LD_PRELOAD"));
-    vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
-    vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("GST_PLUGIN_PATH"));
-    vector_of_strings_representing_bubblewrap_command_arguments.push(String::from(""));
 
     // Unified Command Gatekeeper: CLI 覆盖自定义 Wine 路径
     let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
-        string_representing_cli_wine_path
+        fs_absolute_path_secure(std::path::Path::new(&string_representing_cli_wine_path)).to_string_lossy().into_owned()
     } else {
-        pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine")
+        let string_representing_wine_path_raw = pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine");
+        if string_representing_wine_path_raw == "wine" {
+            string_representing_wine_path_raw
+        } else {
+            fs_absolute_path_secure(std::path::Path::new(&string_representing_wine_path_raw)).to_string_lossy().into_owned()
+        }
     };
 
-    // LD_LIBRARY_PATH Intelligent Sniffing for Custom Engine Packages
-    if pyramid.resolve_configuration_value("LD_LIBRARY_PATH", "").is_empty() {
-        if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
-            let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
-            if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
+    let boolean_flag_indicating_ld_library_path_injection_needed = pyramid.resolve_configuration_value("LD_LIBRARY_PATH", "").is_empty();
+    let boolean_flag_indicating_gst_plugin_path_injection_needed = pyramid.resolve_configuration_value("GST_PLUGIN_PATH", "").is_empty();
+    let mut string_representing_sniffed_gst_plugin_path = String::new();
+
+    // LD_LIBRARY_PATH & GST_PLUGIN_PATH Intelligent Sniffing for Custom Engine Packages
+    if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
+        let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
+        if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
+            
+            // 1. 宿主机端专有运行库（LD_LIBRARY_PATH）智能自愈注入
+            if boolean_flag_indicating_ld_library_path_injection_needed {
                 let mut vector_of_strings_representing_inferred_library_paths = Vec::new();
                 let array_of_strings_representing_potential_library_subdirectories = ["lib", "lib64", "files/lib", "files/lib64"];
                 
@@ -1111,7 +1149,33 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
                     vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_joined_ld_library_path);
                 }
             }
+
+            // 2. 宿主机端 GStreamer 音视频核心解码插件路径探测与注入
+            if boolean_flag_indicating_gst_plugin_path_injection_needed {
+                let mut vector_of_strings_representing_inferred_gst_paths = Vec::new();
+                let array_of_strings_representing_potential_gst_subdirectories = [
+                    "lib/gstreamer-1.0", "lib64/gstreamer-1.0", "files/lib/gstreamer-1.0", "files/lib64/gstreamer-1.0"
+                ];
+                
+                for string_slice_representing_gst_subdirectory in array_of_strings_representing_potential_gst_subdirectories {
+                    let path_buf_representing_potential_gst_path = path_buf_representing_inferred_runner_root.join(string_slice_representing_gst_subdirectory);
+                    if path_buf_representing_potential_gst_path.exists() {
+                        vector_of_strings_representing_inferred_gst_paths.push(path_buf_representing_potential_gst_path.to_string_lossy().into_owned());
+                    }
+                }
+
+                if !vector_of_strings_representing_inferred_gst_paths.is_empty() {
+                    string_representing_sniffed_gst_plugin_path = vector_of_strings_representing_inferred_gst_paths.join(":");
+                }
+            }
         }
+    }
+
+    // 写入 GStreamer 共享库探测结果，若无，自动覆盖为空以阻断宿主机版本冲突
+    if boolean_flag_indicating_gst_plugin_path_injection_needed {
+        vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
+        vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("GST_PLUGIN_PATH"));
+        vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_sniffed_gst_plugin_path);
     }
 
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--die-with-parent"));
