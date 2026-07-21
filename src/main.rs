@@ -707,42 +707,56 @@ fn collect_mount_specifications(
     let string_representing_penetrate_depth_value = pyramid.resolve_configuration_value("WINER_PENETRATE", "1");
     let unsigned_integer_representing_penetrate_depth = string_representing_penetrate_depth_value.parse::<usize>().unwrap_or(1);
 
-    let mut path_buf_representing_current_penetrated_directory = target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone();
-    if unsigned_integer_representing_penetrate_depth == 0 {
-        vector_of_mount_specifications.push(MountSpecification {
-            path_buf_representing_host_source: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
-            path_buf_representing_container_destination: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
-            boolean_flag_indicating_readonly: true,
-            boolean_flag_indicating_try_only: false,
-            boolean_flag_indicating_host_directory_creation_allowed: false,
-        });
-    } else {
-        for _ in 0..unsigned_integer_representing_penetrate_depth {
-            if let Some(path_slice_representing_parent_directory) = path_buf_representing_current_penetrated_directory.parent() {
-                path_buf_representing_current_penetrated_directory = path_slice_representing_parent_directory.to_path_buf();
-            } else {
-                break;
+    // [优化点] 对涉及前缀比对的路径进行严格的绝对化/符号链接规范化
+    let path_buf_representing_canonicalized_sandbox_home = fs_absolute_path_secure(&sandbox_context_representing_runtime_environment.path_buf_representing_sandbox_home_directory);
+    let path_buf_representing_canonicalized_executable = fs_absolute_path_secure(&target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file);
+    
+    let boolean_flag_indicating_executable_is_in_sandbox = path_buf_representing_canonicalized_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home);
+
+    if !boolean_flag_indicating_executable_is_in_sandbox {
+        let mut path_buf_representing_current_penetrated_directory = target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone();
+        if unsigned_integer_representing_penetrate_depth == 0 {
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                path_buf_representing_container_destination: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                boolean_flag_indicating_readonly: true,
+                boolean_flag_indicating_try_only: false,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
+            });
+        } else {
+            for _ in 0..unsigned_integer_representing_penetrate_depth {
+                if let Some(path_slice_representing_parent_directory) = path_buf_representing_current_penetrated_directory.parent() {
+                    path_buf_representing_current_penetrated_directory = path_slice_representing_parent_directory.to_path_buf();
+                } else {
+                    break;
+                }
             }
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: path_buf_representing_current_penetrated_directory.clone(),
+                path_buf_representing_container_destination: path_buf_representing_current_penetrated_directory.clone(),
+                boolean_flag_indicating_readonly: false,
+                boolean_flag_indicating_try_only: false,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
+            });
         }
-        vector_of_mount_specifications.push(MountSpecification {
-            path_buf_representing_host_source: path_buf_representing_current_penetrated_directory.clone(),
-            path_buf_representing_container_destination: path_buf_representing_current_penetrated_directory.clone(),
-            boolean_flag_indicating_readonly: false,
-            boolean_flag_indicating_try_only: false,
-            boolean_flag_indicating_host_directory_creation_allowed: false,
-        });
     }
 
     let string_representing_wine_prefix_resolved_value = pyramid.resolve_configuration_value("WINEPREFIX", "");
     if !string_representing_wine_prefix_resolved_value.is_empty() {
         let path_buf_representing_custom_wine_prefix = fs_absolute_path_secure(std::path::Path::new(&string_representing_wine_prefix_resolved_value));
-        vector_of_mount_specifications.push(MountSpecification {
-            path_buf_representing_host_source: path_buf_representing_custom_wine_prefix.clone(),
-            path_buf_representing_container_destination: path_buf_representing_custom_wine_prefix,
-            boolean_flag_indicating_readonly: false,
-            boolean_flag_indicating_try_only: false,
-            boolean_flag_indicating_host_directory_creation_allowed: true, // Only WINEPREFIX gets this privilege safely
-        });
+        
+        // [优化点] 基于规范化路径判断 WINEPREFIX 是否落在沙箱目录内
+        if path_buf_representing_custom_wine_prefix.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
+            let _ = std::fs::create_dir_all(&path_buf_representing_custom_wine_prefix);
+        } else {
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: path_buf_representing_custom_wine_prefix.clone(),
+                path_buf_representing_container_destination: path_buf_representing_custom_wine_prefix,
+                boolean_flag_indicating_readonly: false,
+                boolean_flag_indicating_try_only: false,
+                boolean_flag_indicating_host_directory_creation_allowed: true,
+            });
+        }
     }
 
     let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
@@ -751,6 +765,7 @@ fn collect_mount_specifications(
         pyramid.resolve_configuration_value("WINER_WINE_PATH", "wine")
     };
 
+    // LD_LIBRARY_PATH & GST_PLUGIN_PATH Intelligent Sniffing for Custom Engine Packages
     if string_representing_custom_wine_binary_path != "wine" && (string_representing_custom_wine_binary_path.contains('/') || string_representing_custom_wine_binary_path.contains('\\')) {
         let path_buf_representing_wine_binary = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
         
@@ -976,6 +991,9 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     let mut vector_of_strings_representing_bubblewrap_command_arguments: Vec<String> = Vec::new();
     let pyramid = &sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers;
 
+    // [优化点] 预先抽取并清洗出绝对化的 sandbox_home，供后续所有路径投影使用
+    let path_buf_representing_canonicalized_sandbox_home = fs_absolute_path_secure(&sandbox_context_representing_runtime_environment.path_buf_representing_sandbox_home_directory);
+
     // Base System Binds
     let array_of_strings_representing_standard_readonly_bind_mount_paths = ["/usr", "/etc", "/sys", "/proc"];
     for string_slice_representing_path_to_bind in array_of_strings_representing_standard_readonly_bind_mount_paths {
@@ -1086,6 +1104,10 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
 
     // Custom Environment Variables Injection
     let mut hash_set_representing_all_configuration_keys = std::collections::HashSet::new();
+    
+    hash_set_representing_all_configuration_keys.insert(String::from("WINEPREFIX"));
+    hash_set_representing_all_configuration_keys.insert(String::from("WINER_EXE_PATH"));
+    
     for string_representing_key in pyramid.hash_map_representing_global_configuration_keys_and_values.keys() {
         hash_set_representing_all_configuration_keys.insert(string_representing_key.clone());
     }
@@ -1096,9 +1118,20 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         hash_set_representing_all_configuration_keys.insert(string_representing_key.clone());
     }
     for string_representing_key in hash_set_representing_all_configuration_keys {
-        if !string_representing_key.starts_with("WINER_") {
-            let string_representing_resolved_value = pyramid.resolve_configuration_value(&string_representing_key, "");
+        if !string_representing_key.starts_with("WINER_") || string_representing_key == "WINER_EXE_PATH" {
+            let mut string_representing_resolved_value = pyramid.resolve_configuration_value(&string_representing_key, "");
             if !string_representing_resolved_value.is_empty() {
+                // [优化点] 基于绝对化/清洗过的路径进行判定，保障软链接情况下的正确投影
+                if string_representing_key == "WINEPREFIX" || string_representing_key == "WINER_EXE_PATH" {
+                    let path_buf_representing_custom_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_resolved_value));
+                    
+                    if path_buf_representing_custom_path.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
+                        if let Ok(path_slice_representing_relative_subpath) = path_buf_representing_custom_path.strip_prefix(&path_buf_representing_canonicalized_sandbox_home) {
+                            let path_buf_representing_in_container_path = sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.join(path_slice_representing_relative_subpath);
+                            string_representing_resolved_value = path_buf_representing_in_container_path.to_string_lossy().into_owned();
+                        }
+                    }
+                }
                 vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
                 vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_key);
                 vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_resolved_value);
@@ -1109,7 +1142,7 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--unsetenv"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("LD_PRELOAD"));
 
-    // Unified Command Gatekeeper: CLI 覆盖自定义 Wine 路径
+    // Unified Command Gatekeeper
     let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
         fs_absolute_path_secure(std::path::Path::new(&string_representing_cli_wine_path)).to_string_lossy().into_owned()
     } else {
@@ -1190,7 +1223,18 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     } else {
         sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone()
     };
-    let string_representing_target_working_directory_path = path_buf_representing_target_working_directory.to_string_lossy().into_owned();
+    
+    // [优化点] 对提取出来的 CWD 进行绝对化安全清洗
+    let path_buf_representing_canonicalized_cwd = fs_absolute_path_secure(&path_buf_representing_target_working_directory);
+    let mut string_representing_target_working_directory_path = path_buf_representing_canonicalized_cwd.to_string_lossy().into_owned();
+    
+    if path_buf_representing_canonicalized_cwd.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
+        if let Ok(path_slice_representing_relative_subpath) = path_buf_representing_canonicalized_cwd.strip_prefix(&path_buf_representing_canonicalized_sandbox_home) {
+            let path_buf_representing_in_container_path = sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.join(path_slice_representing_relative_subpath);
+            string_representing_target_working_directory_path = path_buf_representing_in_container_path.to_string_lossy().into_owned();
+        }
+    }
+    
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--chdir"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_target_working_directory_path);
 
@@ -1205,11 +1249,21 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     }
     
     // 如果是物理文件（免疫目录切换干扰），使用绝对路径；如果是虚拟裸命令（如 cmd），使用 raw 裸词。
-    let string_representing_final_target_execution_path = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
+    let mut string_representing_final_target_execution_path = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
         target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.to_string_lossy().into_owned()
     } else {
         target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file.clone()
     };
+    
+    // [优化点] 同样对 EXE 的绝对路径做清洗规范化以用于前缀判定
+    let path_buf_representing_canonicalized_target_executable = fs_absolute_path_secure(&target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file);
+    if path_buf_representing_canonicalized_target_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
+        if let Ok(path_slice_representing_relative_subpath) = path_buf_representing_canonicalized_target_executable.strip_prefix(&path_buf_representing_canonicalized_sandbox_home) {
+            let path_buf_representing_in_container_path = sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.join(path_slice_representing_relative_subpath);
+            string_representing_final_target_execution_path = path_buf_representing_in_container_path.to_string_lossy().into_owned();
+        }
+    }
+    
     vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_final_target_execution_path);
     
     for string_slice_representing_arg in pyramid.resolve_configuration_value("WINER_EXE_ARGS", "").split_whitespace() {
