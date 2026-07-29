@@ -48,8 +48,11 @@ struct SandboxContext {
 /// 目标可执行文件及衍生状态的解析结果实体。
 struct TargetSpecification {
     string_representing_raw_path_to_target_executable_file: String,
-    path_buf_representing_absolute_path_to_target_executable_file: PathBuf,
+    // 修改为 Option，如果为 None，则代表它是一个物理不存在的纯虚拟命令
+    option_representing_absolute_path_to_target_executable_file: Option<PathBuf>, 
     boolean_flag_indicating_wine_prefix_prepending_needed: bool,
+    // 新增：明确标记是否为虚拟命令，指导下游管线免除路径穿透
+    boolean_flag_indicating_is_virtual_command: bool, 
     vector_of_strings_representing_remaining_cli_arguments: Vec<String>,
 }
 
@@ -336,12 +339,13 @@ fn resolve_wine_runner_root_directory_from_binary_path(
     }
 }
 
-/// 安全探测：通过非独占性共享路径排除法 (Shared Path Exclusion)，判断推导出的 Runner Root 是否散落在系统的共享大目录中。
-fn determine_if_inferred_runner_root_is_scattered_shared_directory(
-    path_slice_representing_inferred_runner_root: &std::path::Path,
+/// 通用安全门禁防线：通过非独占性共享路径排除法，判断目标路径是否散落在系统的共享大目录中。
+/// 用于拦截并阻止任何试图将整个根目录、/usr 等系统核心，以及宿主整个家目录进行自动 bind-mount 的危险行为。
+fn determine_if_path_is_prohibited_shared_system_directory(
+    path_slice_representing_directory_to_check: &std::path::Path,
     path_slice_representing_host_home_directory: &std::path::Path,
 ) -> bool {
-    let string_representing_root_path = path_slice_representing_inferred_runner_root.to_string_lossy().into_owned();
+    let string_representing_path = path_slice_representing_directory_to_check.to_string_lossy().into_owned();
     
     // 系统级公共共享容器名单（根目录等直接硬拦截，防止隔离逃逸）
     let array_of_strings_representing_scattered_system_paths = [
@@ -349,13 +353,13 @@ fn determine_if_inferred_runner_root_is_scattered_shared_directory(
     ];
     
     for string_slice_representing_scattered_path in array_of_strings_representing_scattered_system_paths {
-        if string_representing_root_path == string_slice_representing_scattered_path {
+        if string_representing_path == string_slice_representing_scattered_path {
             return true;
         }
     }
 
-    // 家目录本身也作为共享容器拒绝自动整体挂载
-    if path_slice_representing_inferred_runner_root == path_slice_representing_host_home_directory {
+    // 核心拦截：绝不允许程序试图自动穿透挂载整个真实的宿主家目录
+    if path_slice_representing_directory_to_check == path_slice_representing_host_home_directory {
         return true;
     }
 
@@ -377,15 +381,15 @@ fn print_bwrap_winer_help_information() {
     println!("CONFIGURATION PYRAMID PRIORITY (Highest to Lowest):");
     println!("    [1] Environment Variables                          (Ephemeral instant override)");
     println!("    [2] Sandbox Runtime Meta (winer_meta.toml)         (Runtime auto-generated states in XDG_DATA_HOME)");
-    println!("    [3] User Sandbox Config ([SANDBOX_ID].toml)        (Dotfiles-friendly profiles in XDG_CONFIG_HOME)");
+    println!("    [3] User Sandbox Config ([WINER_ID].toml)        (Dotfiles-friendly profiles in XDG_CONFIG_HOME)");
     println!("    [4] Global User Config (config.toml)               (Global engineering configuration)");
     println!("    [5] Hardcoded default values                       (System-wide fallback security)");
     println!();
     println!("COMPLIANT PATHS (XDG BASE DIRECTORY SPECIFICATION):");
     println!("    Global Config  $XDG_CONFIG_HOME/bwrap-winer/config.toml             (Default: ~/.config/...)");
-    println!("    User Profile   $XDG_CONFIG_HOME/bwrap-winer/[SANDBOX_ID].toml");
+    println!("    User Profile   $XDG_CONFIG_HOME/bwrap-winer/[WINER_ID].toml");
     println!("    Sandbox Root   $XDG_DATA_HOME/bwrap-winer/sandboxes/                (Default: ~/.local/share/...)");
-    println!("    Runtime Meta   $XDG_DATA_HOME/bwrap-winer/sandboxes/[SANDBOX_ID]/winer_meta.toml");
+    println!("    Runtime Meta   $XDG_DATA_HOME/bwrap-winer/sandboxes/[WINER_ID]/winer_meta.toml");
     println!();
     println!("SUPPORTED CONFIGURATION KEYS & ENVIRONMENT VARIABLES:");
     println!("    WINER_EXE_PATH   Target executable file path (can substitute CLI argument).");
@@ -598,7 +602,7 @@ fn resolve_target_executable_and_validate(
     sandbox_context_representing_runtime_environment: &SandboxContext,
     option_representing_cli_custom_wine_path: &Option<String>,
 ) -> TargetSpecification {
-    let mut string_representing_raw_path_to_target_executable_file = match option_representing_raw_target_executable {
+    let string_representing_raw_path_to_target_executable_file = match option_representing_raw_target_executable {
         Some(string_representing_known_exe) => string_representing_known_exe,
         None => {
             let string_representing_resolved_exe_path = sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_EXE_PATH", "");
@@ -610,88 +614,109 @@ fn resolve_target_executable_and_validate(
         }
     };
 
-    // Custom Wine Engine Auto-Mount Injection
     let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
         string_representing_cli_wine_path.clone()
     } else {
         sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_WINE_PATH", "wine")
     };
 
-    // 第一步：运行器本地重定向 (Runner-Local Redirect)
-    // 如果用户输入的是裸命令（如 "winecfg"），优先去指定的 Wine 引擎同级目录下探寻物理软链接。
-    if !string_representing_raw_path_to_target_executable_file.contains('/') && !string_representing_raw_path_to_target_executable_file.contains('\\') {
-        let path_buf_representing_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
-        if let Some(path_slice_representing_engine_directory) = path_buf_representing_engine_path.parent() {
-            let path_buf_representing_potential_local_target = path_slice_representing_engine_directory.join(&string_representing_raw_path_to_target_executable_file);
-            if path_buf_representing_potential_local_target.exists() {
-                string_representing_raw_path_to_target_executable_file = path_buf_representing_potential_local_target.to_string_lossy().into_owned();
+    // =========================================================================
+    // 第一步：宿主机物理实体探测 (Physical Probe)
+    // =========================================================================
+    let mut option_representing_physical_absolute_path: Option<PathBuf> = None;
+
+    // 1. 显式路径检测（带有正反斜杠，证明有强烈的路径指向意图）
+    if string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\') {
+        let path_buf_representing_candidate = fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_path_to_target_executable_file));
+        if path_buf_representing_candidate.exists() {
+            option_representing_physical_absolute_path = Some(path_buf_representing_candidate);
+        }
+    } else {
+        // 2. Linux PATH 环境物理搜寻
+        if let Ok(string_representing_env_path) = std::env::var("PATH") {
+            for string_slice_representing_directory in string_representing_env_path.split(':') {
+                let path_buf_representing_candidate = std::path::Path::new(string_slice_representing_directory).join(&string_representing_raw_path_to_target_executable_file);
+                if path_buf_representing_candidate.exists() {
+                    option_representing_physical_absolute_path = Some(fs_absolute_path_secure(&path_buf_representing_candidate));
+                    break;
+                }
             }
         }
-    }
-
-    let path_buf_representing_absolute_path_to_target_executable_file = fs_absolute_path_secure(std::path::Path::new(&string_representing_raw_path_to_target_executable_file));
-
-    // 第二步：物理等价性验证 (Identity Check)
-    // 必须首先对引擎路径进行 PATH 安全清洗，然后再送入规范化比对，否则会导致裸命令 "wine" 比对失败
-    let mut boolean_flag_indicating_is_wine_multicall_symlink = false;
-    let path_buf_representing_secured_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
-
-    if let (Ok(path_buf_representing_real_target), Ok(path_buf_representing_real_engine)) = (
-        std::fs::canonicalize(&path_buf_representing_absolute_path_to_target_executable_file),
-        std::fs::canonicalize(&path_buf_representing_secured_engine_path)
-    ) {
-        if path_buf_representing_real_target == path_buf_representing_real_engine {
-            boolean_flag_indicating_is_wine_multicall_symlink = true;
-        }
-    }
-
-    let string_representing_target_executable_lowercase = string_representing_raw_path_to_target_executable_file.to_lowercase();
-    let mut boolean_flag_indicating_wine_prefix_prepending_needed = false;
-
-    // 第三步：智能路由与拦截分流
-    if boolean_flag_indicating_is_wine_multicall_symlink {
-        // 分支 A：它是指向引擎的软链接（如 /usr/bin/winecfg）。
-        // 行为：直接原生执行，Wine 会根据 argv[0] 多路复用，绝对不需要前置补齐 `wine`。
-        boolean_flag_indicating_wine_prefix_prepending_needed = false;
-    } else if string_representing_target_executable_lowercase.ends_with(".exe") 
-        || string_representing_target_executable_lowercase.ends_with(".bat")
-        || string_representing_target_executable_lowercase.ends_with(".cmd") 
-        || string_representing_target_executable_lowercase.ends_with(".msi") 
-        || string_representing_target_executable_lowercase.ends_with(".reg")
-    {
-        // 分支 B：明确的 Windows 执行文件格式。
-        // 行为：前置补齐 `wine` 唤起。
-        boolean_flag_indicating_wine_prefix_prepending_needed = true;
-    } else if !string_representing_raw_path_to_target_executable_file.contains('/') && !string_representing_raw_path_to_target_executable_file.contains('\\') {
-        // 分支 C：虚拟裸命令（如 "cmd", "explorer"），在物理宿主机上不存在，也无法重定向。
-        // 行为：这是对 Wine 虚拟 C 盘的指令调用，必须前置补齐 `wine` 唤起。
-        boolean_flag_indicating_wine_prefix_prepending_needed = true;
-    }
-
-    // 第四步：极简安全拦截 (只拦截非同源的 Linux ELF)
-    // 只有在“非软链接引擎”、“且有物理路径”的情况下，才进行 ELF 侦测，完美避开软链接误杀。
-    if !boolean_flag_indicating_is_wine_multicall_symlink && (string_representing_raw_path_to_target_executable_file.contains('/') || string_representing_raw_path_to_target_executable_file.contains('\\')) {
-        if !path_buf_representing_absolute_path_to_target_executable_file.exists() {
-            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable file not found -> {:?}", path_buf_representing_absolute_path_to_target_executable_file);
-            std::process::exit(1);
-        }
         
-        if let Ok(mut file_representing_target_executable) = std::fs::File::open(&path_buf_representing_absolute_path_to_target_executable_file) {
-            let mut array_of_bytes_representing_magic_number = [0u8; 4];
-            if file_representing_target_executable.read(&mut array_of_bytes_representing_magic_number).is_ok() {
-                if array_of_bytes_representing_magic_number == [0x7f, 0x45, 0x4c, 0x46] {
-                    eprintln!("[bwrap-winer] SECURITY BLOCK: '{:?}' is a native Linux ELF binary.", path_buf_representing_absolute_path_to_target_executable_file);
-                    eprintln!("[bwrap-winer] This tool is strictly a Wine sandbox proxy. Refusing to run native Linux programs.");
-                    std::process::exit(1);
+        // 3. 引擎同级运行库物理搜寻 (Runner-Local Redirect)
+        if option_representing_physical_absolute_path.is_none() {
+            let path_buf_representing_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
+            if let Some(path_slice_representing_engine_directory) = path_buf_representing_engine_path.parent() {
+                let path_buf_representing_candidate = path_slice_representing_engine_directory.join(&string_representing_raw_path_to_target_executable_file);
+                if path_buf_representing_candidate.exists() {
+                    option_representing_physical_absolute_path = Some(fs_absolute_path_secure(&path_buf_representing_candidate));
+                }
+            }
+        }
+
+        // 4. 当前工作目录 (CWD) 保底物理探测 - 应对裸文件名如 `setup.exe` 的情况
+        if option_representing_physical_absolute_path.is_none() {
+            if let Ok(path_buf_representing_cwd) = std::env::current_dir() {
+                let path_buf_representing_candidate = path_buf_representing_cwd.join(&string_representing_raw_path_to_target_executable_file);
+                if path_buf_representing_candidate.exists() && path_buf_representing_candidate.is_file() {
+                    option_representing_physical_absolute_path = Some(fs_absolute_path_secure(&path_buf_representing_candidate));
                 }
             }
         }
     }
 
+    // =========================================================================
+    // 第二步：分流与特征标记 (Disambiguation)
+    // =========================================================================
+    let boolean_flag_indicating_wine_prefix_prepending_needed: bool;
+    let mut boolean_flag_indicating_is_virtual_command = false;
+    let mut boolean_flag_indicating_is_wine_multicall_symlink = false;
+
+    if let Some(path_buf_representing_physical_absolute_path) = &option_representing_physical_absolute_path {
+        // 分支 A: 物理实体存在 (Host Physical Target)
+        
+        // 等价性验证（防止软链接误判）
+        let path_buf_representing_secured_engine_path = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
+        if let (Ok(path_buf_representing_real_target), Ok(path_buf_representing_real_engine)) = (
+            std::fs::canonicalize(path_buf_representing_physical_absolute_path),
+            std::fs::canonicalize(&path_buf_representing_secured_engine_path)
+        ) {
+            if path_buf_representing_real_target == path_buf_representing_real_engine {
+                boolean_flag_indicating_is_wine_multicall_symlink = true;
+            }
+        }
+
+        if boolean_flag_indicating_is_wine_multicall_symlink {
+            // 直接原生执行，Wine 会根据 argv[0] 多路复用
+            boolean_flag_indicating_wine_prefix_prepending_needed = false;
+        } else {
+            // 物理文件，无论它是什么，都需要前补 wine 代理
+            boolean_flag_indicating_wine_prefix_prepending_needed = true;
+
+            // 安全校验：硬性拦截宿主环境下的原生 Linux ELF
+            if let Ok(mut file_representing_target_executable) = std::fs::File::open(path_buf_representing_physical_absolute_path) {
+                let mut array_of_bytes_representing_magic_number = [0u8; 4];
+                // 修复 Warning 1：直接使用 Trait 方法调用 .read() 激活头部导入
+                if file_representing_target_executable.read(&mut array_of_bytes_representing_magic_number).is_ok() {
+                    if array_of_bytes_representing_magic_number == [0x7f, 0x45, 0x4c, 0x46] {
+                        eprintln!("[bwrap-winer] SECURITY BLOCK: '{:?}' is a native Linux ELF binary.", path_buf_representing_physical_absolute_path);
+                        eprintln!("[bwrap-winer] Refusing to run native Linux programs.");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    } else {
+        // 分支 B: 物理实体不存在 (Virtual Wine Target)
+        boolean_flag_indicating_is_virtual_command = true;
+        boolean_flag_indicating_wine_prefix_prepending_needed = true;
+    }
+
     TargetSpecification {
         string_representing_raw_path_to_target_executable_file,
-        path_buf_representing_absolute_path_to_target_executable_file,
+        option_representing_absolute_path_to_target_executable_file: option_representing_physical_absolute_path,
         boolean_flag_indicating_wine_prefix_prepending_needed,
+        boolean_flag_indicating_is_virtual_command,
         vector_of_strings_representing_remaining_cli_arguments,
     }
 }
@@ -707,37 +732,67 @@ fn collect_mount_specifications(
     let string_representing_penetrate_depth_value = pyramid.resolve_configuration_value("WINER_PENETRATE", "1");
     let unsigned_integer_representing_penetrate_depth = string_representing_penetrate_depth_value.parse::<usize>().unwrap_or(1);
 
-    // [优化点] 对涉及前缀比对的路径进行严格的绝对化/符号链接规范化
     let path_buf_representing_canonicalized_sandbox_home = fs_absolute_path_secure(&sandbox_context_representing_runtime_environment.path_buf_representing_sandbox_home_directory);
-    let path_buf_representing_canonicalized_executable = fs_absolute_path_secure(&target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file);
-    
-    let boolean_flag_indicating_executable_is_in_sandbox = path_buf_representing_canonicalized_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home);
 
-    if !boolean_flag_indicating_executable_is_in_sandbox {
-        let mut path_buf_representing_current_penetrated_directory = target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone();
-        if unsigned_integer_representing_penetrate_depth == 0 {
-            vector_of_mount_specifications.push(MountSpecification {
-                path_buf_representing_host_source: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
-                path_buf_representing_container_destination: target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone(),
-                boolean_flag_indicating_readonly: true,
-                boolean_flag_indicating_try_only: false,
-                boolean_flag_indicating_host_directory_creation_allowed: false,
-            });
-        } else {
-            for _ in 0..unsigned_integer_representing_penetrate_depth {
-                if let Some(path_slice_representing_parent_directory) = path_buf_representing_current_penetrated_directory.parent() {
-                    path_buf_representing_current_penetrated_directory = path_slice_representing_parent_directory.to_path_buf();
+    // 只有当目标是物理文件时，才执行路径穿透挂载逻辑，彻底屏蔽虚拟裸命令的路径推导
+    if !target_specification_representing_validated_execution.boolean_flag_indicating_is_virtual_command {
+        if let Some(path_buf_representing_absolute_path_to_target_executable_file) = &target_specification_representing_validated_execution.option_representing_absolute_path_to_target_executable_file {
+            
+            // [优化点] 对涉及前缀比对的路径进行严格的绝对化/符号链接规范化
+            let path_buf_representing_canonicalized_executable = fs_absolute_path_secure(path_buf_representing_absolute_path_to_target_executable_file);
+            let boolean_flag_indicating_executable_is_in_sandbox = path_buf_representing_canonicalized_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home);
+
+            if !boolean_flag_indicating_executable_is_in_sandbox {
+                let mut path_buf_representing_current_penetrated_directory = path_buf_representing_absolute_path_to_target_executable_file.clone();
+                
+                if unsigned_integer_representing_penetrate_depth == 0 {
+                    vector_of_mount_specifications.push(MountSpecification {
+                        path_buf_representing_host_source: path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                        path_buf_representing_container_destination: path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                        boolean_flag_indicating_readonly: true,
+                        boolean_flag_indicating_try_only: false,
+                        boolean_flag_indicating_host_directory_creation_allowed: false,
+                    });
                 } else {
-                    break;
+                    for _ in 0..unsigned_integer_representing_penetrate_depth {
+                        if let Some(path_slice_representing_parent_directory) = path_buf_representing_current_penetrated_directory.parent() {
+                            let path_buf_representing_parent = path_slice_representing_parent_directory.to_path_buf();
+                            
+                            // 绝不允许退栈到被禁止的大目录
+                            if determine_if_path_is_prohibited_shared_system_directory(&path_buf_representing_parent, &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory) {
+                                eprintln!("[bwrap-winer] SECURITY SHIELD: Penetration path reached a prohibited shared directory (e.g. HOME or ROOT).");
+                                eprintln!("[bwrap-winer] Stopping penetration at: {:?}", path_buf_representing_current_penetrated_directory);
+                                break; // 停止退栈，保留在当前安全的子目录层级
+                            }
+                            
+                            path_buf_representing_current_penetrated_directory = path_buf_representing_parent;
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    // 二次结算防线：防止用户直接在 HOME 运行安装包，导致计算后的目录仍然是大目录
+                    if determine_if_path_is_prohibited_shared_system_directory(&path_buf_representing_current_penetrated_directory, &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory) {
+                        eprintln!("[bwrap-winer] CRITICAL WARNING: Target resides directly in a prohibited directory. Downgrading to file-only read-only mount.");
+                        vector_of_mount_specifications.push(MountSpecification {
+                            path_buf_representing_host_source: path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                            path_buf_representing_container_destination: path_buf_representing_absolute_path_to_target_executable_file.clone(),
+                            boolean_flag_indicating_readonly: true,
+                            boolean_flag_indicating_try_only: true,
+                            boolean_flag_indicating_host_directory_creation_allowed: false,
+                        });
+                    } else {
+                        // 路径安全，实施读写穿透挂载
+                        vector_of_mount_specifications.push(MountSpecification {
+                            path_buf_representing_host_source: path_buf_representing_current_penetrated_directory.clone(),
+                            path_buf_representing_container_destination: path_buf_representing_current_penetrated_directory.clone(),
+                            boolean_flag_indicating_readonly: false,
+                            boolean_flag_indicating_try_only: false,
+                            boolean_flag_indicating_host_directory_creation_allowed: false,
+                        });
+                    }
                 }
             }
-            vector_of_mount_specifications.push(MountSpecification {
-                path_buf_representing_host_source: path_buf_representing_current_penetrated_directory.clone(),
-                path_buf_representing_container_destination: path_buf_representing_current_penetrated_directory.clone(),
-                boolean_flag_indicating_readonly: false,
-                boolean_flag_indicating_try_only: false,
-                boolean_flag_indicating_host_directory_creation_allowed: false,
-            });
         }
     }
 
@@ -770,13 +825,13 @@ fn collect_mount_specifications(
         let path_buf_representing_wine_binary = fs_absolute_path_secure(std::path::Path::new(&string_representing_custom_wine_binary_path));
         
         if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
-            let boolean_flag_indicating_scattered_shared_directory = determine_if_inferred_runner_root_is_scattered_shared_directory(
+            let boolean_flag_indicating_prohibited_shared_directory = determine_if_path_is_prohibited_shared_system_directory(
                 &path_buf_representing_inferred_runner_root,
                 &sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory
             );
 
-            if boolean_flag_indicating_scattered_shared_directory {
-                eprintln!("[bwrap-winer] WARNING: The resolved Wine Runner Root ({:?}) is a scattered shared system directory.", path_buf_representing_inferred_runner_root);
+            if boolean_flag_indicating_prohibited_shared_directory {
+                eprintln!("[bwrap-winer] WARNING: The resolved Wine Runner Root ({:?}) is a prohibited shared system directory.", path_buf_representing_inferred_runner_root);
                 eprintln!("[bwrap-winer] For security, auto-mounting is disabled for shared paths to prevent sandbox escape.");
             } else {
                 vector_of_mount_specifications.push(MountSpecification {
@@ -1081,7 +1136,7 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_host_home_directory_path.clone());
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("HOME"));
-    vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_host_home_directory_path);
+    vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_host_home_directory_path.clone());
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("USER"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(sandbox_context_representing_runtime_environment.string_representing_host_username.clone());
@@ -1163,7 +1218,6 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         let path_buf_representing_wine_binary = std::path::PathBuf::from(&string_representing_custom_wine_binary_path);
         if let Some(path_buf_representing_inferred_runner_root) = resolve_wine_runner_root_directory_from_binary_path(&path_buf_representing_wine_binary) {
             
-            // 1. 宿主机端专有运行库（LD_LIBRARY_PATH）智能自愈注入
             if boolean_flag_indicating_ld_library_path_injection_needed {
                 let mut vector_of_strings_representing_inferred_library_paths = Vec::new();
                 let array_of_strings_representing_potential_library_subdirectories = ["lib", "lib64", "files/lib", "files/lib64"];
@@ -1183,7 +1237,6 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
                 }
             }
 
-            // 2. 宿主机端 GStreamer 音视频核心解码插件路径探测与注入
             if boolean_flag_indicating_gst_plugin_path_injection_needed {
                 let mut vector_of_strings_representing_inferred_gst_paths = Vec::new();
                 let array_of_strings_representing_potential_gst_subdirectories = [
@@ -1204,7 +1257,6 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         }
     }
 
-    // 写入 GStreamer 共享库探测结果，若无，自动覆盖为空以阻断宿主机版本冲突
     if boolean_flag_indicating_gst_plugin_path_injection_needed {
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--setenv"));
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("GST_PLUGIN_PATH"));
@@ -1213,13 +1265,19 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
 
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--die-with-parent"));
 
-    // 智能防御回退：如果执行的是内置指令(非物理文件/目录)，CWD 回退到安全的 $HOME，防止 bwrap 崩溃
-    let path_buf_representing_target_working_directory = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
-        target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.parent()
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone())
-    } else if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_dir() {
-        target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.clone()
+    // 智能防御回退：如果是虚拟命令，CWD 回退到安全的 $HOME；若是物理文件则解析。
+    let path_buf_representing_target_working_directory = if target_specification_representing_validated_execution.boolean_flag_indicating_is_virtual_command {
+        sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone()
+    } else if let Some(path_buf_representing_absolute_path) = &target_specification_representing_validated_execution.option_representing_absolute_path_to_target_executable_file {
+        if path_buf_representing_absolute_path.is_file() {
+            path_buf_representing_absolute_path.parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(|| sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone())
+        } else if path_buf_representing_absolute_path.is_dir() {
+            path_buf_representing_absolute_path.clone()
+        } else {
+            sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone()
+        }
     } else {
         sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.clone()
     };
@@ -1248,19 +1306,23 @@ fn assemble_bubblewrap_arguments_and_execute_process_replacement(
         vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_custom_wine_binary_path);
     }
     
-    // 如果是物理文件（免疫目录切换干扰），使用绝对路径；如果是虚拟裸命令（如 cmd），使用 raw 裸词。
-    let mut string_representing_final_target_execution_path = if target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.is_file() {
-        target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file.to_string_lossy().into_owned()
+    let mut string_representing_final_target_execution_path = if target_specification_representing_validated_execution.boolean_flag_indicating_is_virtual_command {
+        target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file.clone()
+    } else if let Some(path_buf_representing_absolute_path) = &target_specification_representing_validated_execution.option_representing_absolute_path_to_target_executable_file {
+        path_buf_representing_absolute_path.to_string_lossy().into_owned()
     } else {
         target_specification_representing_validated_execution.string_representing_raw_path_to_target_executable_file.clone()
     };
     
-    // [优化点] 同样对 EXE 的绝对路径做清洗规范化以用于前缀判定
-    let path_buf_representing_canonicalized_target_executable = fs_absolute_path_secure(&target_specification_representing_validated_execution.path_buf_representing_absolute_path_to_target_executable_file);
-    if path_buf_representing_canonicalized_target_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
-        if let Ok(path_slice_representing_relative_subpath) = path_buf_representing_canonicalized_target_executable.strip_prefix(&path_buf_representing_canonicalized_sandbox_home) {
-            let path_buf_representing_in_container_path = sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.join(path_slice_representing_relative_subpath);
-            string_representing_final_target_execution_path = path_buf_representing_in_container_path.to_string_lossy().into_owned();
+    if !target_specification_representing_validated_execution.boolean_flag_indicating_is_virtual_command {
+        if let Some(path_buf_representing_absolute_path) = &target_specification_representing_validated_execution.option_representing_absolute_path_to_target_executable_file {
+            let path_buf_representing_canonicalized_target_executable = fs_absolute_path_secure(path_buf_representing_absolute_path);
+            if path_buf_representing_canonicalized_target_executable.starts_with(&path_buf_representing_canonicalized_sandbox_home) {
+                if let Ok(path_slice_representing_relative_subpath) = path_buf_representing_canonicalized_target_executable.strip_prefix(&path_buf_representing_canonicalized_sandbox_home) {
+                    let path_buf_representing_in_container_path = sandbox_context_representing_runtime_environment.path_buf_representing_host_home_directory.join(path_slice_representing_relative_subpath);
+                    string_representing_final_target_execution_path = path_buf_representing_in_container_path.to_string_lossy().into_owned();
+                }
+            }
         }
     }
     
