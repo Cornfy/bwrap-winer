@@ -51,14 +51,21 @@ WINER_DEV = "1"
 # "0" - Disabled (default).
 WINER_GAMEMODE = "0"
 
+# Virtual Desktop: Constrains execution to a simulated resolution inside a window.
+; WINER_DESKTOP = "1920x1080"
+
+
 # --------------------------------------------------------------------
 # ⚠️ TIP: The parameters below are recommended for use ONLY in specific 
-#    '[WINER_ID].toml' profiles rather than the global configuration.
+#    'IDs/[WINER_ID].toml' profiles rather than the global configuration.
 
-# [Target Application & Arguments]
+# [Target Application, Launcher Prefixes & Arguments]
 # Explicit override for the unique sandbox identifier.
 # Defaults to a short hash computed from the EXE path or WINEPREFIX.
 ; WINER_ID = "my_custom_sandbox_id"
+
+# Custom launcher prefix command chain (e.g., '~/patch/patcher.exe').
+; WINER_EXE_PRE = "~/patch/patcher.exe"
 
 # Absolute host path to the target Windows executable file.
 ; WINER_EXE_PATH = "/path/to/your/application.exe"
@@ -109,9 +116,6 @@ WINE_LARGE_ADDRESS_AWARE = "1"
 # "fixme-all"      # Only silences annoying 'fixme' unimplemented alerts (recommended).
 # "warn+all"       # Prints all warnings (useful for debugging crashes and errors).
 WINEDEBUG = "-all"
-
-# Virtual Desktop: Constrains execution to a simulated resolution inside a window.
-; WINE_DESKTOP_USER_X11 = "1920x1080"
 
 
 # =====================================================================

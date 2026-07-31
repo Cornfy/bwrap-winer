@@ -10,32 +10,34 @@ use crate::file_system_utilities::{fs_absolute_path_secure, resolve_wine_runner_
 
 pub fn print_bwrap_winer_help_information() {
     println!("🛠  bwrap-winer - Zero-Flags Transparent Wine Sandbox Proxy");
-    println!("===============================================================");
+    println!("==========================================================================");
     println!("A lightweight, zero-flag Unix-style sandbox proxy utilizing bubblewrap.");
     println!();
     println!("USAGE:");
     println!("    bwrap-winer <executable.exe> [arguments...]");
-    println!("    bwrap-winer /path/to/wine <executable.exe> [arguments...]");
-    println!("    WINER_ID=myapp bwrap-winer");
+    println!("    bwrap-winer [prefix_commands...] <executable.exe> [arguments...]");
+    println!("    bwrap-winer /path/to/wine [prefix_commands...] <executable.exe> [arguments...]");
+    println!("    WINER_ID=my_custom_sandbox_id bwrap-winer");
     println!("    bwrap-winer --list");
     println!("    bwrap-winer -h | --help");
     println!();
     println!("CONFIGURATION PYRAMID PRIORITY (Highest to Lowest):");
     println!("    [1] Environment Variables                          (Ephemeral instant override)");
     println!("    [2] Sandbox Runtime Meta (winer_meta.toml)         (Runtime auto-generated states in XDG_DATA_HOME)");
-    println!("    [3] User Sandbox Config ([WINER_ID].toml)        (Dotfiles-friendly profiles in XDG_CONFIG_HOME)");
+    println!("    [3] User Sandbox Config (IDs/[WINER_ID].toml)      (Dotfiles-friendly profiles in XDG_CONFIG_HOME)");
     println!("    [4] Global User Config (config.toml)               (Global engineering configuration)");
     println!("    [5] Hardcoded default values                       (System-wide fallback security)");
     println!();
     println!("COMPLIANT PATHS (XDG BASE DIRECTORY SPECIFICATION):");
     println!("    Global Config  $XDG_CONFIG_HOME/bwrap-winer/config.toml             (Default: ~/.config/...)");
-    println!("    User Profile   $XDG_CONFIG_HOME/bwrap-winer/[WINER_ID].toml");
+    println!("    User Profile   $XDG_CONFIG_HOME/bwrap-winer/IDs/[WINER_ID].toml");
     println!("    Sandbox Root   $XDG_DATA_HOME/bwrap-winer/sandboxes/                (Default: ~/.local/share/...)");
     println!("    Runtime Meta   $XDG_DATA_HOME/bwrap-winer/sandboxes/[WINER_ID]/winer_meta.toml");
     println!();
     println!("SUPPORTED CONFIGURATION KEYS & ENVIRONMENT VARIABLES:");
     println!("    WINER_EXE_PATH   Target executable file path (can substitute CLI argument).");
     println!("    WINER_EXE_ARGS   Arguments to pass to the target executable.");
+    println!("    WINER_EXE_PRE    Custom launcher prefix command chain (e.g., '~/patch/patcher.exe').");
     println!("    WINER_WINE_PATH  Custom Wine binary path to use instead of system 'wine'.");
     println!("    WINER_ID         Explicit override for the unique sandbox identifier.");
     println!("    WINER_DATA_ROOT  Alternative root directory path for sandboxes storage.");
@@ -43,6 +45,7 @@ pub fn print_bwrap_winer_help_information() {
     println!("    WINER_SHARE_PID  PID namespace sharing: '1' (shared, default) or '0' (strict process isolation).");
     println!("    WINER_IPC        IPC namespace sharing: '1' (shared, default) or '0' (isolated with performance warning).");
     println!("    WINER_DEV        Input hardware pass-through: '1' (full /dev bind, default) or '0' (DRI & NVIDIA only).");
+    println!("    WINER_DESKTOP    Virtual desktop resolution wrapper (e.g., '1920x1080', '1280x720', default: disabled).");
     println!("    WINER_PENETRATE  File mounting penetration depth: '0' (file-only), '1' (parent, default), or 'n' (n-th parent).");
     println!("    WINER_GAMEMODE   GameMode high-performance wrapping: '1' (enable gamemoderun) or '0' (disabled, default).");
     println!("    WINER_BIND       Comma-separated read-write paths to mount (e.g., /host_dir:/sandbox_dir).");
@@ -405,12 +408,10 @@ pub fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     }
     
     // e. 原样透传目标参数 (Target Arguments Passthrough)
-    let string_representing_resolved_exe_args = pyramid.resolve_configuration_value("WINER_EXE_ARGS", "");
-    for string_slice_representing_arg in string_representing_resolved_exe_args.split_whitespace() {
-        if !string_slice_representing_arg.is_empty() {
-            vector_of_strings_representing_sandbox_inner_command_execution.push(string_slice_representing_arg.to_string());
-        }
-    }
+    // 💡 架构设计说明：
+    // 阶段 3 的 remaining_cli_arguments 在【模式 A (CLI直通)】下已包含所有 CLI 传入的参数；
+    // 在【模式 B (纯配置)】下已提前装载了配置中的 WINER_EXE_ARGS 。
+    // 此处直接透传 remaining_cli_arguments，既履行了模式 A 下忽略配置的承诺，又保证了模式 B 的参数完整。
     for string_representing_cli_argument in target_specification_representing_validated_execution.vector_of_strings_representing_remaining_cli_arguments {
         vector_of_strings_representing_sandbox_inner_command_execution.push(string_representing_cli_argument);
     }

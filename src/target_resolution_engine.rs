@@ -36,13 +36,6 @@ pub fn parse_target_executable_and_remaining_arguments_from_cli(
         }
     }
     
-    // 如果命令行根本没给参数，尝试从环境变量兜底，以保证无参启动支持
-    if vector_of_strings_representing_raw_target_and_arguments.is_empty() {
-        if let Ok(string_representing_env_exe_path) = std::env::var("WINER_EXE_PATH") {
-            vector_of_strings_representing_raw_target_and_arguments.push(string_representing_env_exe_path);
-        }
-    }
-
     (option_representing_cli_custom_wine_path, vector_of_strings_representing_raw_target_and_arguments)
 }
 
@@ -146,81 +139,156 @@ fn probe_host_physical_entity(string_slice_representing_raw_argument: &str) -> O
 // 🧠 阶段 3：多参数扫描器与意图结算核心引擎
 // ==========================================
 
-/// 多参数物理探针扫描器：执行基于“双轨意图-现实对照”的零白名单解引用与分类算法。
-pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
+/// 内部临时数据结构：用于在扫描器、前缀注入器和结算器之间传递中间状态
+struct IntermediateScannedArgumentsCollection {
+    option_representing_primary_target_raw_input: Option<String>,
+    option_representing_absolute_path_to_primary_target_executable: Option<PathBuf>,
+    vector_of_strings_representing_launcher_prefix_commands: Vec<String>,
+    vector_of_path_bufs_representing_secondary_penetration_mount_sources: Vec<PathBuf>,
+    vector_of_strings_representing_remaining_cli_arguments: Vec<String>,
+    boolean_flag_indicating_primary_target_found: bool,
+}
+
+/// 子步骤 3.1：执行多参数物理探针扫描，基于模式严格互斥原则处理 CLI 与 TOML
+fn scan_and_collect_physical_entities_and_prefixes(
     vector_of_strings_representing_raw_target_and_arguments: Vec<String>,
     sandbox_context_representing_runtime_environment: &SandboxContext,
-    option_representing_cli_custom_wine_path: &Option<String>,
-) -> TargetSpecification {
-    
-    // 如果没有参数，尝试从 TOML 中补齐
-    let mut vector_of_strings_representing_all_arguments = vector_of_strings_representing_raw_target_and_arguments.clone();
-    if vector_of_strings_representing_all_arguments.is_empty() {
-        let string_representing_resolved_exe_path = sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_EXE_PATH", "");
-        if string_representing_resolved_exe_path.is_empty() {
-            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable could not be resolved from CLI, ENV, or TOML configs.");
-            std::process::exit(1);
-        }
-        vector_of_strings_representing_all_arguments.push(string_representing_resolved_exe_path);
-        
-        let string_representing_resolved_exe_args = sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_EXE_ARGS", "");
-        for string_slice_representing_arg in string_representing_resolved_exe_args.split_whitespace() {
-            vector_of_strings_representing_all_arguments.push(string_slice_representing_arg.to_string());
-        }
-    }
+) -> IntermediateScannedArgumentsCollection {
+    let pyramid = &sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers;
 
-    let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
-        string_representing_cli_wine_path.clone()
-    } else {
-        sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_WINE_PATH", "wine")
+    let mut collection = IntermediateScannedArgumentsCollection {
+        option_representing_primary_target_raw_input: None,
+        option_representing_absolute_path_to_primary_target_executable: None,
+        vector_of_strings_representing_launcher_prefix_commands: Vec::new(),
+        vector_of_path_bufs_representing_secondary_penetration_mount_sources: Vec::new(),
+        vector_of_strings_representing_remaining_cli_arguments: Vec::new(),
+        boolean_flag_indicating_primary_target_found: false,
     };
 
-    let mut vector_of_strings_representing_launcher_prefix_commands = Vec::new();
-    let mut vector_of_path_bufs_representing_secondary_penetration_mount_sources = Vec::new();
-    
-    let mut option_representing_primary_target_raw_input: Option<String> = None;
-    let mut option_representing_absolute_path_to_primary_target_executable: Option<PathBuf> = None;
-    let mut vector_of_strings_representing_remaining_cli_arguments = Vec::new();
-    
-    let mut boolean_flag_indicating_primary_target_found = false;
+    // 模式严格互斥分流：CLI 覆盖模式 vs TOML 默认模式
+    if !vector_of_strings_representing_raw_target_and_arguments.is_empty() {
+        // =====================================================================
+        // 【模式 A：CLI 绝对直通模式】
+        // 命令行传了位置参数！完全使用 CLI 传入的参数链跑探针，忽略 TOML/ENV 里的 EXE 变量
+        // =====================================================================
+        
+        // 友好提示：检测 TOML/ENV 中是否存在将被绕过的目标配置，若存在则提醒用户
+        let string_representing_ignored_toml_exe_path = pyramid.resolve_configuration_value("WINER_EXE_PATH", "");
+        let string_representing_ignored_toml_exe_pre = pyramid.resolve_configuration_value("WINER_EXE_PRE", "");
+        let string_representing_ignored_toml_exe_args = pyramid.resolve_configuration_value("WINER_EXE_ARGS", "");
 
-    // 扫描器核心：从左到右执行探针
-    for string_representing_current_argument in vector_of_strings_representing_all_arguments.into_iter() {
-        if !boolean_flag_indicating_primary_target_found {
-            // 寻找第一个物理实体
-            let option_representing_probed_physical_path = probe_host_physical_entity(&string_representing_current_argument);
-            
-            if let Some(path_buf_representing_physical_absolute_path) = option_representing_probed_physical_path {
-                // 命中首个物理实体，锁定为主目标 (Primary Target)
-                boolean_flag_indicating_primary_target_found = true;
-                option_representing_primary_target_raw_input = Some(string_representing_current_argument);
-                option_representing_absolute_path_to_primary_target_executable = Some(path_buf_representing_physical_absolute_path.clone());
+        if !string_representing_ignored_toml_exe_path.is_empty()
+            || !string_representing_ignored_toml_exe_pre.is_empty()
+            || !string_representing_ignored_toml_exe_args.is_empty()
+        {
+            eprintln!("[bwrap-winer] NOTICE: Positional CLI arguments detected. Bypassing profile target configurations (WINER_EXE_PATH / WINER_EXE_PRE / WINER_EXE_ARGS) for this session.");
+        }
+
+        // 扫描器核心：对 CLI 参数从左到右执行探针
+        for string_representing_current_argument in vector_of_strings_representing_raw_target_and_arguments.into_iter() {
+            if !collection.boolean_flag_indicating_primary_target_found {
+                if let Some(path_buf_representing_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument) {
+                    collection.boolean_flag_indicating_primary_target_found = true;
+                    collection.option_representing_primary_target_raw_input = Some(string_representing_current_argument);
+                    collection.option_representing_absolute_path_to_primary_target_executable = Some(path_buf_representing_physical_absolute_path);
+                } else {
+                    collection.vector_of_strings_representing_launcher_prefix_commands.push(string_representing_current_argument);
+                }
             } else {
-                // 未命中物理实体，视为前缀指令链的一部分 (Launcher Prefix)
-                vector_of_strings_representing_launcher_prefix_commands.push(string_representing_current_argument);
-            }
-        } else {
-            // 主目标已锁定，所有后续参数归入 Target Args
-            vector_of_strings_representing_remaining_cli_arguments.push(string_representing_current_argument.clone());
-            
-            // 自动追加探测后续参数，若为物理文件，加入二次挂载源（完美兼容 Mod/补丁 注入链）
-            let option_representing_probed_secondary_physical_path = probe_host_physical_entity(&string_representing_current_argument);
-            if let Some(path_buf_representing_secondary_physical_absolute_path) = option_representing_probed_secondary_physical_path {
-                if let Some(path_slice_representing_parent) = path_buf_representing_secondary_physical_absolute_path.parent() {
-                    vector_of_path_bufs_representing_secondary_penetration_mount_sources.push(path_slice_representing_parent.to_path_buf());
+                collection.vector_of_strings_representing_remaining_cli_arguments.push(string_representing_current_argument.clone());
+                if let Some(path_buf_representing_secondary_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument) {
+                    if let Some(path_slice_representing_parent) = path_buf_representing_secondary_physical_absolute_path.parent() {
+                        collection.vector_of_path_bufs_representing_secondary_penetration_mount_sources.push(path_slice_representing_parent.to_path_buf());
+                    }
                 }
             }
         }
+    } else {
+        // =====================================================================
+        // 【模式 B：纯 TOML / ENV 配置模式】
+        // 命令行无位置参数！精确绑定 WINER_EXE_PRE、WINER_EXE_PATH 与 WINER_EXE_ARGS
+        // =====================================================================
+        
+        // 1. 锚定主目标 (WINER_EXE_PATH)
+        let string_representing_resolved_exe_path = pyramid.resolve_configuration_value("WINER_EXE_PATH", "");
+        if string_representing_resolved_exe_path.is_empty() {
+            eprintln!("[bwrap-winer] CRITICAL ERROR: Target executable could not be resolved from ENV, or TOML configs.");
+            std::process::exit(1);
+        }
+        
+        collection.option_representing_primary_target_raw_input = Some(string_representing_resolved_exe_path.clone());
+        if let Some(path_buf_representing_primary_physical_path) = probe_host_physical_entity(&string_representing_resolved_exe_path) {
+            collection.boolean_flag_indicating_primary_target_found = true;
+            collection.option_representing_absolute_path_to_primary_target_executable = Some(path_buf_representing_primary_physical_path);
+        }
+
+        // 2. 收集前缀 (WINER_EXE_PRE)，若为物理补丁文件，自动追加二次挂载源
+        let string_representing_resolved_prefix_cmd = pyramid.resolve_configuration_value("WINER_EXE_PRE", "");
+        for string_slice_representing_prefix_token in string_representing_resolved_prefix_cmd.split_whitespace() {
+            if !string_slice_representing_prefix_token.is_empty() {
+                if let Some(path_buf_representing_prefix_physical_path) = probe_host_physical_entity(string_slice_representing_prefix_token) {
+                    if let Some(path_slice_representing_parent) = path_buf_representing_prefix_physical_path.parent() {
+                        collection.vector_of_path_bufs_representing_secondary_penetration_mount_sources.push(path_slice_representing_parent.to_path_buf());
+                    }
+                    collection.vector_of_strings_representing_launcher_prefix_commands.push(path_buf_representing_prefix_physical_path.to_string_lossy().into_owned());
+                } else {
+                    collection.vector_of_strings_representing_launcher_prefix_commands.push(string_slice_representing_prefix_token.to_string());
+                }
+            }
+        }
+
+        // 3. 收集主目标参数 (WINER_EXE_ARGS)
+        let string_representing_resolved_exe_args = pyramid.resolve_configuration_value("WINER_EXE_ARGS", "");
+        for string_slice_representing_arg_token in string_representing_resolved_exe_args.split_whitespace() {
+            if !string_slice_representing_arg_token.is_empty() {
+                collection.vector_of_strings_representing_remaining_cli_arguments.push(string_slice_representing_arg_token.to_string());
+            }
+        }
     }
 
-    // 意图结算与分流 (Disambiguation)
+    collection
+}
+
+/// 子步骤 3.2：安全地将 WINER_DESKTOP 插入到前缀指令链的最前端
+fn inject_virtual_desktop_prefix_if_configured_and_safe(
+    scanned_collection: &mut IntermediateScannedArgumentsCollection,
+    sandbox_context_representing_runtime_environment: &SandboxContext,
+) {
+    let string_representing_desktop_resolution = sandbox_context_representing_runtime_environment
+        .configuration_pyramid_representing_all_layers
+        .resolve_configuration_value("WINER_DESKTOP", "");
+
+    if !string_representing_desktop_resolution.is_empty() {
+        let boolean_flag_already_contains_explorer_prefix = scanned_collection.vector_of_strings_representing_launcher_prefix_commands
+            .iter()
+            .any(|string_representing_arg| {
+                let string_representing_arg_lowercase = string_representing_arg.to_lowercase();
+                string_representing_arg_lowercase == "explorer" 
+                || string_representing_arg_lowercase == "explorer.exe"
+                || string_representing_arg_lowercase.starts_with("/desktop=")
+                || string_representing_arg_lowercase.starts_with("-desktop=")
+            });
+
+        if !boolean_flag_already_contains_explorer_prefix {
+            let string_representing_desktop_argument = format!("/desktop=sandbox,{}", string_representing_desktop_resolution);
+            // 必须插入到最前端，确保虚拟桌面包裹一切后续工具 (如补丁注入器)
+            scanned_collection.vector_of_strings_representing_launcher_prefix_commands.insert(0, string_representing_desktop_argument);
+            scanned_collection.vector_of_strings_representing_launcher_prefix_commands.insert(0, String::from("explorer"));
+        }
+    }
+}
+
+/// 子步骤 3.3：执行 VFS 解引用比对，决算出最终的强类型 TargetCategory 意图分类
+fn disambiguate_target_intent_and_build_specification(
+    mut scanned_collection: IntermediateScannedArgumentsCollection,
+    string_representing_custom_wine_binary_path: &str,
+) -> TargetSpecification {
     let target_category_enum_representing_execution_type: TargetCategory;
     
-    if boolean_flag_indicating_primary_target_found {
-        let path_buf_representing_physical_absolute_path = option_representing_absolute_path_to_primary_target_executable.clone().unwrap();
+    if scanned_collection.boolean_flag_indicating_primary_target_found {
+        let path_buf_representing_physical_absolute_path = scanned_collection.option_representing_absolute_path_to_primary_target_executable.clone().unwrap();
         
-        // 核心解引用等价性比对
-        let path_buf_representing_secured_engine_path = fs_absolute_path_secure(Path::new(&string_representing_custom_wine_binary_path));
+        let path_buf_representing_secured_engine_path = fs_absolute_path_secure(Path::new(string_representing_custom_wine_binary_path));
         let mut boolean_flag_indicating_is_wine_multicall_symlink = false;
         
         if let (Ok(path_buf_representing_real_target), Ok(path_buf_representing_real_engine)) = (
@@ -235,10 +303,10 @@ pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
         if boolean_flag_indicating_is_wine_multicall_symlink {
             // 分支 3A: 确认为 Wine 多路复用工具
             target_category_enum_representing_execution_type = TargetCategory::WineMulticallTool {
-                string_representing_subcommand_name: option_representing_primary_target_raw_input.clone().unwrap(),
+                string_representing_subcommand_name: scanned_collection.option_representing_primary_target_raw_input.clone().unwrap(),
             };
             // 物理路径重置为空，彻底防范家目录穿透挂载
-            option_representing_absolute_path_to_primary_target_executable = None;
+            scanned_collection.option_representing_absolute_path_to_primary_target_executable = None;
         } else {
             // 分支 3B: 宿主机外部物理文件
             if check_if_file_is_linux_native_elf(&path_buf_representing_physical_absolute_path) {
@@ -254,17 +322,17 @@ pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
     } else {
         // 分支 4: 扫描全过程均未发现物理文件
         // 原第一参数成为 Virtual Command，其余参数全部移入 remaining args
-        if !vector_of_strings_representing_launcher_prefix_commands.is_empty() {
-            let string_representing_virtual_command = vector_of_strings_representing_launcher_prefix_commands.remove(0);
-            option_representing_primary_target_raw_input = Some(string_representing_virtual_command.clone());
+        if !scanned_collection.vector_of_strings_representing_launcher_prefix_commands.is_empty() {
+            let string_representing_virtual_command = scanned_collection.vector_of_strings_representing_launcher_prefix_commands.remove(0);
+            scanned_collection.option_representing_primary_target_raw_input = Some(string_representing_virtual_command.clone());
             
             // 将剩余的所有伪前缀倒推回目标参数列表中
-            let mut vector_of_strings_representing_new_remaining_args = vector_of_strings_representing_launcher_prefix_commands.clone();
-            vector_of_strings_representing_new_remaining_args.append(&mut vector_of_strings_representing_remaining_cli_arguments);
-            vector_of_strings_representing_remaining_cli_arguments = vector_of_strings_representing_new_remaining_args;
+            let mut vector_of_strings_representing_new_remaining_args = scanned_collection.vector_of_strings_representing_launcher_prefix_commands.clone();
+            vector_of_strings_representing_new_remaining_args.append(&mut scanned_collection.vector_of_strings_representing_remaining_cli_arguments);
+            scanned_collection.vector_of_strings_representing_remaining_cli_arguments = vector_of_strings_representing_new_remaining_args;
             
             // 清空前缀链
-            vector_of_strings_representing_launcher_prefix_commands.clear();
+            scanned_collection.vector_of_strings_representing_launcher_prefix_commands.clear();
             
             target_category_enum_representing_execution_type = TargetCategory::VirtualWineCommand {
                 string_representing_command_name: string_representing_virtual_command,
@@ -276,11 +344,42 @@ pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
     }
 
     TargetSpecification {
-        string_representing_raw_user_input_target: option_representing_primary_target_raw_input.unwrap(),
-        option_representing_absolute_path_to_primary_target_executable,
-        vector_of_strings_representing_launcher_prefix_commands,
-        vector_of_path_bufs_representing_secondary_penetration_mount_sources,
+        string_representing_raw_user_input_target: scanned_collection.option_representing_primary_target_raw_input.unwrap(),
+        option_representing_absolute_path_to_primary_target_executable: scanned_collection.option_representing_absolute_path_to_primary_target_executable,
+        vector_of_strings_representing_launcher_prefix_commands: scanned_collection.vector_of_strings_representing_launcher_prefix_commands,
+        vector_of_path_bufs_representing_secondary_penetration_mount_sources: scanned_collection.vector_of_path_bufs_representing_secondary_penetration_mount_sources,
         target_category_enum_representing_execution_type,
-        vector_of_strings_representing_remaining_cli_arguments,
+        vector_of_strings_representing_remaining_cli_arguments: scanned_collection.vector_of_strings_representing_remaining_cli_arguments,
     }
+}
+
+/// 主协调器：执行基于“双轨意图-现实对照”的零白名单解引用与分类算法。
+pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
+    vector_of_strings_representing_raw_target_and_arguments: Vec<String>,
+    sandbox_context_representing_runtime_environment: &SandboxContext,
+    option_representing_cli_custom_wine_path: &Option<String>,
+) -> TargetSpecification {
+    let string_representing_custom_wine_binary_path = if let Some(string_representing_cli_wine_path) = option_representing_cli_custom_wine_path {
+        string_representing_cli_wine_path.clone()
+    } else {
+        sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_WINE_PATH", "wine")
+    };
+
+    // 步骤 1：扫描 (已融入 CLI 覆盖 vs TOML 默认的严格互斥)
+    let mut scanned_collection = scan_and_collect_physical_entities_and_prefixes(
+        vector_of_strings_representing_raw_target_and_arguments,
+        sandbox_context_representing_runtime_environment,
+    );
+
+    // 步骤 2：虚拟桌面安全注入 (确保排在前缀最前列)
+    inject_virtual_desktop_prefix_if_configured_and_safe(
+        &mut scanned_collection,
+        sandbox_context_representing_runtime_environment,
+    );
+
+    // 步骤 3：结算并返回最终实体
+    disambiguate_target_intent_and_build_specification(
+        scanned_collection,
+        &string_representing_custom_wine_binary_path,
+    )
 }

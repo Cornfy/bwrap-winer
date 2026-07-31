@@ -146,8 +146,11 @@ pub fn load_configuration_hierarchy(
         &path_buf_representing_global_configuration_file_path,
     );
 
+    // 🚨 修正：将沙箱专属配置放入 IDs/ 子目录下，规避 WINER_ID=config 冲突
     let path_buf_representing_sandbox_specific_user_config_path = path_buf_representing_global_config_root
+        .join("IDs")
         .join(format!("{}.toml", string_representing_derived_sandbox_identifier));
+        
     let hash_map_representing_sandbox_specific_user_configuration_keys_and_values = parse_simple_flat_toml_file_into_hash_map(
         &path_buf_representing_sandbox_specific_user_config_path,
     );

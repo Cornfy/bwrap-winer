@@ -11,10 +11,13 @@
 #    Shell expansions like '~' or '$HOME' are NOT supported.
 
 
-# [Target Application & Arguments]
+# [Target Application, Launcher Prefixes & Arguments]
 # Explicit override for the unique sandbox identifier.
 # Defaults to a short hash computed from the EXE path or WINEPREFIX.
 WINER_ID = "some-game"
+
+# Custom launcher prefix command chain (e.g., '~/patch/patcher.exe').
+; WINER_EXE_PRE = "~/patch/patcher.exe"
 
 # Absolute host path to the target Windows executable file.
 WINER_EXE_PATH = "/mnt/Games/some-game/game.exe"
@@ -28,6 +31,9 @@ WINER_EXE_PATH = "/mnt/Games/some-game/game.exe"
 # "1" - Prepends 'gamemoderun' to lock high-performance profiles (requires Feral GameMode).
 # "0" - Disabled (default).
 WINER_GAMEMODE = "1"
+
+# Virtual Desktop: Constrains execution to a simulated resolution inside a window.
+; WINER_DESKTOP = "1920x1080"
 
 
 # [Directory Binds & Executable Penetration]
@@ -43,8 +49,7 @@ WINER_GAMEMODE = "1"
 ; WINER_RO_BIND = ""
 
 # Wine Prefix
-WINEPREFIX = '/home/username/Games/prefixes/some-game_prefix'
+WINEPREFIX = '~/Games/prefixes/some-game_prefix'
 
 # Enable MangoHud
 MANGOHUD = "1"
-

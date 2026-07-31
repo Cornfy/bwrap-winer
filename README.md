@@ -23,7 +23,8 @@ We adhere strictly to the UNIX philosophy: *"Do one thing and do it well."*
 ```text
 ~/.config/bwrap-winer/
 ├── config.toml              # General configuration
-└── [WINER_ID].toml        # User configuration
+└── IDs
+    └── [WINER_ID].toml      # User configuration
 
 ~/.local/share/bwrap-winer/sandboxes/[WINER_ID]/
 ├── winer_meta.toml          # Local configuration overrides for this sandbox
@@ -41,6 +42,7 @@ All keys can be declared either as host environment variables or as key-value pa
 |---|---|---|
 | `WINER_EXE_PATH` | Empty | Target executable file path (can substitute CLI argument). |
 | `WINER_EXE_ARGS` | Empty | Arguments to pass to the target executable. |
+| `WINER_EXE_PRE` | Empty | Custom launcher prefix command chain (e.g., `~/patch/patcher.exe`). |
 | `WINER_WINE_PATH` | `wine` | Custom Wine binary path to use instead of system 'wine'. |
 | `WINER_ID` | Auto-Hash | Explicit override for the unique sandbox identifier. |
 | `WINER_DATA_ROOT` | XDG default | Alternative root directory path for sandboxes storage. |
@@ -48,6 +50,7 @@ All keys can be declared either as host environment variables or as key-value pa
 | `WINER_SHARE_PID` | `1` | PID namespace sharing: '1' (shared, default) or '0' (strict process isolation). |
 | `WINER_IPC` | `1` | IPC namespace sharing: '1' (shared, default) or '0' (isolated with performance warning). |
 | `WINER_DEV` | `1` | Input hardware pass-through: '1' (full /dev bind, default) or '0' (DRI & NVIDIA only). |
+| `WINER_DESKTOP` | Empty | Virtual desktop resolution wrapper (e.g., '1920x1080', '1280x720', default: disabled). |
 | `WINER_PENETRATE` | `1` | File mounting penetration depth: '0' (file-only), '1' (parent, default), or 'n' (n-th parent). |
 | `WINER_GAMEMODE` | `0` | GameMode high-performance wrapping: '1' (enable gamemoderun) or '0' (disabled, default). |
 | `WINER_BIND` | Empty | Comma-separated read-write paths to mount (e.g., `/host_dir:/sandbox_dir`). |
