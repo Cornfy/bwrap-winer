@@ -69,23 +69,52 @@ pub struct MountSpecification {
     pub boolean_flag_indicating_host_directory_creation_allowed: bool,
 }
 
-/// 配置金字塔实体：安全封装 3 个维度的哈希表，并提供便捷的级联查询接口。
+/// 配置金字塔实体：在初始化时已将全局、用户、沙箱、环境变量 4 层配置
+/// 按优先级从低到高进行覆盖合并，查询效率为 O(1)。
 pub struct ConfigurationPyramid {
-    pub hash_map_representing_sandbox_local_configuration_keys_and_values: HashMap<String, String>,
-    pub hash_map_representing_sandbox_specific_user_configuration_keys_and_values: HashMap<String, String>,
-    pub hash_map_representing_global_configuration_keys_and_values: HashMap<String, String>,
+    // 私有字段，外部无法直接访问，保护了封装性
+    merged_configuration_map: HashMap<String, String>,
 }
 
 impl ConfigurationPyramid {
-    /// 利用内部结构体调用底层的分层查询逻辑（具体实现在 configuration_management 模块）
+    /// 构造函数：执行金字塔合并逻辑
+    pub fn new(
+        hash_map_representing_global_config: HashMap<String, String>,
+        hash_map_representing_user_config: HashMap<String, String>,
+        hash_map_representing_local_config: HashMap<String, String>,
+    ) -> Self {
+        let mut merged_configuration_map = HashMap::new();
+
+        // 优先级 4: 全局配置 (最低优先级)
+        merged_configuration_map.extend(hash_map_representing_global_config);
+        // 优先级 3: 用户配置
+        merged_configuration_map.extend(hash_map_representing_user_config);
+        // 优先级 2: 沙箱局部配置
+        merged_configuration_map.extend(hash_map_representing_local_config);
+
+        // 优先级 1: 环境变量 (最高优先级)
+        for (string_representing_env_key, string_representing_env_value) in std::env::vars() {
+            if string_representing_env_key.starts_with("WINER_") || string_representing_env_key == "WINEPREFIX" {
+                merged_configuration_map.insert(string_representing_env_key, string_representing_env_value);
+            }
+        }
+
+        ConfigurationPyramid { merged_configuration_map }
+    }
+
+    /// O(1) 极速查询，并统一在此处处理波浪号展开
     pub fn resolve_configuration_value(&self, string_slice_representing_variable_key: &str, string_slice_representing_hardcoded_default_value: &str) -> String {
-        crate::configuration_management::resolve_configuration_value_from_hierarchical_sources(
-            string_slice_representing_variable_key,
-            &self.hash_map_representing_sandbox_local_configuration_keys_and_values,
-            &self.hash_map_representing_sandbox_specific_user_configuration_keys_and_values,
-            &self.hash_map_representing_global_configuration_keys_and_values,
-            string_slice_representing_hardcoded_default_value,
-        )
+        let string_representing_raw_value = self.merged_configuration_map
+            .get(string_slice_representing_variable_key)
+            .cloned()
+            .unwrap_or_else(|| string_slice_representing_hardcoded_default_value.to_string());
+            
+        crate::file_system_utilities::expand_tilde_in_configuration_value(string_representing_raw_value)
+    }
+
+    /// 暴露所有需要注入到沙箱内部的环境变量键名
+    pub fn get_all_configuration_keys(&self) -> Vec<String> {
+        self.merged_configuration_map.keys().cloned().collect()
     }
 }
 
@@ -96,6 +125,14 @@ pub struct SandboxContext {
     pub path_buf_representing_host_home_directory: PathBuf,
     pub string_representing_host_username: String,
     pub path_buf_representing_sandbox_home_directory: PathBuf,
+
+    // 💡 强类型化所有容器隔离与运行开关
+    pub boolean_flag_indicating_network_enabled: bool,
+    pub boolean_flag_indicating_pid_sharing_enabled: bool,
+    pub boolean_flag_indicating_ipc_sharing_enabled: bool,
+    pub boolean_flag_indicating_full_device_passthrough_enabled: bool,
+    pub boolean_flag_indicating_gamemode_enabled: bool,
+
     pub configuration_pyramid_representing_all_layers: ConfigurationPyramid,
 }
 

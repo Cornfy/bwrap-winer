@@ -56,9 +56,14 @@ pub fn resolve_sandbox_identity(
         return string_representing_global_sandbox_id.clone();
     }
     
-    let string_representing_wine_prefix_resolved_value = crate::configuration_management::resolve_configuration_value_from_hierarchical_sources(
-        "WINEPREFIX", &std::collections::HashMap::new(), &std::collections::HashMap::new(), &hash_map_representing_global_configuration_keys_and_values, ""
+    // 使用 ConfigurationPyramid 临时实例查询 WINEPREFIX，自动支持环境变量覆盖
+    let temporary_early_stage_configuration_pyramid = crate::core_data_structures::ConfigurationPyramid::new(
+        hash_map_representing_global_configuration_keys_and_values,
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
     );
+
+    let string_representing_wine_prefix_resolved_value = temporary_early_stage_configuration_pyramid.resolve_configuration_value("WINEPREFIX", "");
     
     if !string_representing_wine_prefix_resolved_value.is_empty() {
         let path_buf_representing_explicit_wine_prefix = fs_absolute_path_secure(Path::new(&string_representing_wine_prefix_resolved_value));

@@ -33,7 +33,7 @@ pub fn determine_if_path_is_prohibited_shared_system_directory(
         }
     }
 
-    // 🚨 核心拦截：绝不允许程序试图自动穿透挂载整个真实的宿主家目录 🚨
+    // 🚨 核心拦截：绝不允许程序试图自动穿透挂载整个真实的宿主家目录
     if path_slice_representing_directory_to_check == path_slice_representing_host_home_directory {
         return true;
     }
@@ -253,7 +253,7 @@ pub fn collect_mount_specifications(
     }
 
     // ==========================================
-    // 必备硬件/图形基础设施挂载 (Wayland, X11, Audio, Fonts, DBus)
+    // 必备硬件/图形基础设施挂载 (Wayland, X11, Audio, Fonts, DBus, N卡)
     // ==========================================
 
     if let Ok(string_representing_wayland_display_value) = std::env::var("WAYLAND_DISPLAY") {
@@ -325,6 +325,62 @@ pub fn collect_mount_specifications(
             boolean_flag_indicating_try_only: true,
             boolean_flag_indicating_host_directory_creation_allowed: false,
         });
+    }
+
+    let array_of_strings_representing_hardware_db_paths = [
+        "/run/udev", "/etc/udev"
+    ];
+    for string_slice_representing_hw_path in array_of_strings_representing_hardware_db_paths {
+        vector_of_mount_specifications.push(MountSpecification {
+            path_buf_representing_host_source: PathBuf::from(string_slice_representing_hw_path),
+            path_buf_representing_container_destination: PathBuf::from(string_slice_representing_hw_path),
+            boolean_flag_indicating_readonly: true,
+            boolean_flag_indicating_try_only: true,
+            boolean_flag_indicating_host_directory_creation_allowed: false,
+        });
+    }
+
+    if !sandbox_context_representing_runtime_environment.boolean_flag_indicating_full_device_passthrough_enabled {
+        // 精细隔离模式下：自动收集显卡加速硬件节点
+        if Path::new("/dev/dri").exists() {
+            vector_of_mount_specifications.push(MountSpecification {
+                path_buf_representing_host_source: PathBuf::from("/dev/dri"),
+                path_buf_representing_container_destination: PathBuf::from("/dev/dri"),
+                boolean_flag_indicating_readonly: false,
+                boolean_flag_indicating_try_only: true,
+                boolean_flag_indicating_host_directory_creation_allowed: false,
+            });
+        }
+    
+        // 探测 N 卡设备节点
+        for unsigned_integer_index_representing_nvidia_device_node in 0..10 {
+            let path_buf_representing_nvidia_node = PathBuf::from(format!("/dev/nvidia{}", unsigned_integer_index_representing_nvidia_device_node));
+            if path_buf_representing_nvidia_node.exists() {
+                vector_of_mount_specifications.push(MountSpecification {
+                    path_buf_representing_host_source: path_buf_representing_nvidia_node.clone(),
+                    path_buf_representing_container_destination: path_buf_representing_nvidia_node,
+                    boolean_flag_indicating_readonly: false,
+                    boolean_flag_indicating_try_only: true,
+                    boolean_flag_indicating_host_directory_creation_allowed: false,
+                });
+            }
+        }
+    
+        let array_of_strings_representing_nvidia_control_paths = [
+            "/dev/nvidiactl", "/dev/nvidia-modeset", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools",
+        ];
+        for string_slice_representing_nvidia_control_path in array_of_strings_representing_nvidia_control_paths {
+            let path_buf_representing_nvidia_control_path = PathBuf::from(string_slice_representing_nvidia_control_path);
+            if path_buf_representing_nvidia_control_path.exists() {
+                vector_of_mount_specifications.push(MountSpecification {
+                    path_buf_representing_host_source: path_buf_representing_nvidia_control_path.clone(),
+                    path_buf_representing_container_destination: path_buf_representing_nvidia_control_path,
+                    boolean_flag_indicating_readonly: false,
+                    boolean_flag_indicating_try_only: true,
+                    boolean_flag_indicating_host_directory_creation_allowed: false,
+                });
+            }
+        }
     }
 
     vector_of_mount_specifications

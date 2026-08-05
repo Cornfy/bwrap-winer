@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::file_system_utilities::expand_tilde_in_configuration_value;
 use crate::core_data_structures::ConfigurationPyramid;
 
 // ==========================================
@@ -62,34 +61,6 @@ pub fn parse_simple_flat_toml_file_into_hash_map(
     hash_map_representing_configuration_keys_and_values
 }
 
-/// 5 层金字塔链式覆盖器：级联查询目标值。
-pub fn resolve_configuration_value_from_hierarchical_sources(
-    string_slice_representing_variable_key: &str,
-    hash_map_representing_sandbox_local_data_config: &HashMap<String, String>,
-    hash_map_representing_sandbox_specific_user_config: &HashMap<String, String>,
-    hash_map_representing_global_config: &HashMap<String, String>,
-    string_slice_representing_hardcoded_default_value: &str,
-) -> String {
-    // 1. 环境变量 (最高优先级)
-    if let Ok(string_representing_env_value) = std::env::var(string_slice_representing_variable_key) {
-        return expand_tilde_in_configuration_value(string_representing_env_value);
-    }
-    // 2. 局部沙箱运行时状态配置 (XDG_DATA_HOME/sandboxes/[ID]/winer_meta.toml)
-    if let Some(string_representing_sandbox_value) = hash_map_representing_sandbox_local_data_config.get(string_slice_representing_variable_key) {
-        return expand_tilde_in_configuration_value(string_representing_sandbox_value.clone());
-    }
-    // 3. 用户个人专属沙箱配置 (XDG_CONFIG_HOME/bwrap-winer/[ID].toml)
-    if let Some(string_representing_sandbox_user_value) = hash_map_representing_sandbox_specific_user_config.get(string_slice_representing_variable_key) {
-        return expand_tilde_in_configuration_value(string_representing_sandbox_user_value.clone());
-    }
-    // 4. 全局通用配置 (XDG_CONFIG_HOME/bwrap-winer/config.toml)
-    if let Some(string_representing_global_value) = hash_map_representing_global_config.get(string_slice_representing_variable_key) {
-        return expand_tilde_in_configuration_value(string_representing_global_value.clone());
-    }
-    // 5. 硬编码保底 (最低优先级)
-    expand_tilde_in_configuration_value(string_slice_representing_hardcoded_default_value.to_string())
-}
-
 // ==========================================
 // 🚀 XDG 基础路径与持久化目录推导
 // ==========================================
@@ -125,13 +96,18 @@ pub fn resolve_sandbox_data_root_directory(
         .unwrap_or_else(|| path_buf_representing_host_home_directory.join(".local/share"))
         .join("bwrap-winer/sandboxes");
 
-    let string_representing_data_root_resolved_value = resolve_configuration_value_from_hierarchical_sources(
+    // 使用新的 ConfigurationPyramid 临时实例进行查询，自动继承环境变量优先级
+    let temporary_early_stage_configuration_pyramid = ConfigurationPyramid::new(
+        hash_map_representing_global_configuration_keys_and_values,
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    let string_representing_data_root_resolved_value = temporary_early_stage_configuration_pyramid.resolve_configuration_value(
         "WINER_DATA_ROOT",
-        &HashMap::new(),
-        &HashMap::new(),
-        &hash_map_representing_global_configuration_keys_and_values,
         &path_buf_representing_default_data_root.to_string_lossy(),
     );
+
     PathBuf::from(string_representing_data_root_resolved_value)
 }
 
@@ -161,9 +137,10 @@ pub fn load_configuration_hierarchy(
         &path_buf_representing_sandbox_local_configuration_file_path,
     );
 
-    ConfigurationPyramid {
-        hash_map_representing_sandbox_local_configuration_keys_and_values,
-        hash_map_representing_sandbox_specific_user_configuration_keys_and_values,
+    // 直接使用新的构造函数压平金字塔
+    ConfigurationPyramid::new(
         hash_map_representing_global_configuration_keys_and_values,
-    }
+        hash_map_representing_sandbox_specific_user_configuration_keys_and_values,
+        hash_map_representing_sandbox_local_configuration_keys_and_values,
+    )
 }

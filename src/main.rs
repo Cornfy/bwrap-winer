@@ -66,11 +66,30 @@ fn main() {
     );
 
     // 7. 实例化不可变的运行时上下文 (Sandbox Context)
+    let boolean_flag_indicating_network_enabled = 
+        configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_NET", "1") != "0";
+    let boolean_flag_indicating_pid_sharing_enabled = 
+        configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_SHARE_PID", "1") != "0";
+    let boolean_flag_indicating_ipc_sharing_enabled = 
+        configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_IPC", "1") != "0";
+    let boolean_flag_indicating_full_device_passthrough_enabled = 
+        configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_DEV", "1") != "0";
+    let boolean_flag_indicating_gamemode_enabled = 
+        configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_GAMEMODE", "0") == "1";
+
     let sandbox_context_representing_runtime_environment = SandboxContext {
         string_representing_derived_sandbox_identifier: string_representing_derived_sandbox_identifier.clone(),
         path_buf_representing_host_home_directory,
         string_representing_host_username,
         path_buf_representing_sandbox_home_directory: path_buf_representing_sandbox_data_root_directory.join(&string_representing_derived_sandbox_identifier).join("sandbox_home"),
+        
+        // 存入结算后的布尔值
+        boolean_flag_indicating_network_enabled,
+        boolean_flag_indicating_pid_sharing_enabled,
+        boolean_flag_indicating_ipc_sharing_enabled,
+        boolean_flag_indicating_full_device_passthrough_enabled,
+        boolean_flag_indicating_gamemode_enabled,
+        
         configuration_pyramid_representing_all_layers,
     };
 

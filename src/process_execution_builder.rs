@@ -143,18 +143,18 @@ pub fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--tmpfs"));
     vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("/run"));
 
-    if pyramid.resolve_configuration_value("WINER_NET", "1") == "0" {
+    if !sandbox_context_representing_runtime_environment.boolean_flag_indicating_network_enabled {
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--unshare-net"));
     }
-    if pyramid.resolve_configuration_value("WINER_SHARE_PID", "1") == "0" {
+    if !sandbox_context_representing_runtime_environment.boolean_flag_indicating_pid_sharing_enabled {
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--unshare-pid"));
     }
-    if pyramid.resolve_configuration_value("WINER_IPC", "1") == "0" {
+    if !sandbox_context_representing_runtime_environment.boolean_flag_indicating_ipc_sharing_enabled {
         eprintln!("[bwrap-winer] WARNING: IPC namespace unshared (WINER_IPC=0). Graphics acceleration or Vulkan may be unavailable.");
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--unshare-ipc"));
     }
 
-    if pyramid.resolve_configuration_value("WINER_DEV", "1") == "1" {
+    if sandbox_context_representing_runtime_environment.boolean_flag_indicating_full_device_passthrough_enabled {
         if Path::new("/dev").exists() {
             vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--dev-bind"));
             vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("/dev"));
@@ -163,29 +163,6 @@ pub fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     } else {
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--dev"));
         vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("/dev"));
-        if Path::new("/dev/dri").exists() {
-            vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--dev-bind"));
-            vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("/dev/dri"));
-            vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("/dev/dri"));
-        }
-        for unsigned_integer_index_representing_nvidia_device_node in 0..10 {
-            let string_representing_nvidia_node_path = format!("/dev/nvidia{}", unsigned_integer_index_representing_nvidia_device_node);
-            if Path::new(&string_representing_nvidia_node_path).exists() {
-                vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--dev-bind"));
-                vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_nvidia_node_path.clone());
-                vector_of_strings_representing_bubblewrap_command_arguments.push(string_representing_nvidia_node_path);
-            }
-        }
-        let array_of_strings_representing_nvidia_control_paths = [
-            "/dev/nvidiactl", "/dev/nvidia-modeset", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools",
-        ];
-        for string_slice_representing_nvidia_control_path in array_of_strings_representing_nvidia_control_paths {
-            if Path::new(string_slice_representing_nvidia_control_path).exists() {
-                vector_of_strings_representing_bubblewrap_command_arguments.push(String::from("--dev-bind"));
-                vector_of_strings_representing_bubblewrap_command_arguments.push(String::from(string_slice_representing_nvidia_control_path));
-                vector_of_strings_representing_bubblewrap_command_arguments.push(String::from(string_slice_representing_nvidia_control_path));
-            }
-        }
     }
 
     for string_representing_directory_to_create in vector_of_strings_representing_sorted_directories_to_create {
@@ -229,22 +206,13 @@ pub fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     // 3. 环境变量注入与引擎库嗅探
     // ==========================================
 
-    let mut hash_set_representing_all_configuration_keys = std::collections::HashSet::new();
+    // 💡 架构升级：通过暴露的方法直接获取全部 Keys，消除对内部 HashMap 的暴露
+    let mut vector_of_all_configuration_keys = pyramid.get_all_configuration_keys();
+    // 确保 WINEPREFIX 和 WINER_EXE_PATH 必定被计算和注入
+    if !vector_of_all_configuration_keys.contains(&String::from("WINEPREFIX")) { vector_of_all_configuration_keys.push(String::from("WINEPREFIX")); }
+    if !vector_of_all_configuration_keys.contains(&String::from("WINER_EXE_PATH")) { vector_of_all_configuration_keys.push(String::from("WINER_EXE_PATH")); }
     
-    hash_set_representing_all_configuration_keys.insert(String::from("WINEPREFIX"));
-    hash_set_representing_all_configuration_keys.insert(String::from("WINER_EXE_PATH"));
-    
-    for string_representing_key in pyramid.hash_map_representing_global_configuration_keys_and_values.keys() {
-        hash_set_representing_all_configuration_keys.insert(string_representing_key.clone());
-    }
-    for string_representing_key in pyramid.hash_map_representing_sandbox_specific_user_configuration_keys_and_values.keys() {
-        hash_set_representing_all_configuration_keys.insert(string_representing_key.clone());
-    }
-    for string_representing_key in pyramid.hash_map_representing_sandbox_local_configuration_keys_and_values.keys() {
-        hash_set_representing_all_configuration_keys.insert(string_representing_key.clone());
-    }
-    
-    for string_representing_key in hash_set_representing_all_configuration_keys {
+    for string_representing_key in vector_of_all_configuration_keys {
         if !string_representing_key.starts_with("WINER_") || string_representing_key == "WINER_EXE_PATH" {
             let mut string_representing_resolved_value = pyramid.resolve_configuration_value(&string_representing_key, "");
             if !string_representing_resolved_value.is_empty() {
@@ -369,7 +337,7 @@ pub fn assemble_bubblewrap_arguments_and_execute_process_replacement(
     let mut vector_of_strings_representing_sandbox_inner_command_execution: Vec<String> = Vec::new();
     
     // a. 宿主外围包装器注入 (如 gamemoderun)
-    if pyramid.resolve_configuration_value("WINER_GAMEMODE", "0") == "1" {
+    if sandbox_context_representing_runtime_environment.boolean_flag_indicating_gamemode_enabled {
         vector_of_strings_representing_sandbox_inner_command_execution.push(String::from("gamemoderun"));
     }
     
