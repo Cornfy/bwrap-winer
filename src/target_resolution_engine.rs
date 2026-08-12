@@ -97,9 +97,12 @@ pub fn resolve_sandbox_identity(
 // 🔬 阶段 2：纯粹宿主物理实体探针
 // ==========================================
 
-/// 对目标字符串执行 3 重纯粹物理探测，支持自动附加 ".exe" 以适配 Windows 使用习惯。
-/// 不涉及任何 Wine 特定逻辑，只陈述物理磁盘的客观事实。
-fn probe_host_physical_entity(string_slice_representing_raw_argument: &str) -> Option<PathBuf> {
+/// 对目标字符串执行多重物理探测，支持自动附加 ".exe" 以适配 Windows 使用习惯。
+/// 架构优化：优先在传入的“激活引擎目录”中搜索，从而建立一个专属于当前 Runner 的轻量级虚拟 PATH。
+fn probe_host_physical_entity(
+    string_slice_representing_raw_argument: &str,
+    option_representing_active_engine_bin_dir: Option<&Path>,
+) -> Option<PathBuf> {
     let array_of_strings_representing_candidate_names = if string_slice_representing_raw_argument.to_lowercase().ends_with(".exe") 
         || string_slice_representing_raw_argument.to_lowercase().ends_with(".bat") 
         || string_slice_representing_raw_argument.to_lowercase().ends_with(".msi") 
@@ -118,7 +121,15 @@ fn probe_host_physical_entity(string_slice_representing_raw_argument: &str) -> O
                 return Some(path_buf_representing_candidate);
             }
         } else {
-            // 2. 宿主 Linux PATH 物理搜寻
+            // 2. 优先搜寻当前激活引擎的 bin 目录
+            if let Some(path_slice_representing_engine_bin_dir) = option_representing_active_engine_bin_dir {
+                let path_buf_representing_candidate = path_slice_representing_engine_bin_dir.join(&string_representing_candidate_name);
+                if path_buf_representing_candidate.exists() && path_buf_representing_candidate.is_file() {
+                    return Some(fs_absolute_path_secure(&path_buf_representing_candidate));
+                }
+            }
+
+            // 3. 宿主 Linux PATH 物理搜寻
             if let Ok(string_representing_env_path) = std::env::var("PATH") {
                 for string_slice_representing_directory in string_representing_env_path.split(':') {
                     let path_buf_representing_candidate = Path::new(string_slice_representing_directory).join(&string_representing_candidate_name);
@@ -128,7 +139,7 @@ fn probe_host_physical_entity(string_slice_representing_raw_argument: &str) -> O
                 }
             }
 
-            // 3. 当前工作目录 (CWD) 保底物理探测
+            // 4. 当前工作目录 (CWD) 保底物理探测
             if let Ok(path_buf_representing_cwd) = std::env::current_dir() {
                 let path_buf_representing_candidate = path_buf_representing_cwd.join(&string_representing_candidate_name);
                 if path_buf_representing_candidate.exists() && path_buf_representing_candidate.is_file() {
@@ -139,6 +150,21 @@ fn probe_host_physical_entity(string_slice_representing_raw_argument: &str) -> O
     }
     None
 }
+
+/// 解析 Wine 引擎二进制在宿主机上的真实绝对路径（此时无需注入 bin 目录，避免死循环）
+pub fn resolve_engine_binary_path(string_slice_representing_wine_path: &str) -> PathBuf {
+    if string_slice_representing_wine_path.contains('/')
+        || string_slice_representing_wine_path.contains('\\')
+        || string_slice_representing_wine_path.starts_with('~')
+    {
+        fs_absolute_path_secure(Path::new(string_slice_representing_wine_path))
+    } else if let Some(path_buf_found_in_path) = probe_host_physical_entity(string_slice_representing_wine_path, None) {
+        path_buf_found_in_path
+    } else {
+        fs_absolute_path_secure(Path::new(string_slice_representing_wine_path))
+    }
+}
+
 
 // ==========================================
 // 🧠 阶段 3：多参数扫描器与意图结算核心引擎
@@ -158,6 +184,7 @@ struct IntermediateScannedArgumentsCollection {
 fn scan_and_collect_physical_entities_and_prefixes(
     vector_of_strings_representing_raw_target_and_arguments: Vec<String>,
     sandbox_context_representing_runtime_environment: &SandboxContext,
+    option_representing_active_engine_bin_dir: Option<&Path>,
 ) -> IntermediateScannedArgumentsCollection {
     let pyramid = &sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers;
 
@@ -192,7 +219,7 @@ fn scan_and_collect_physical_entities_and_prefixes(
         // 扫描器核心：对 CLI 参数从左到右执行探针
         for string_representing_current_argument in vector_of_strings_representing_raw_target_and_arguments.into_iter() {
             if !collection.boolean_flag_indicating_primary_target_found {
-                if let Some(path_buf_representing_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument) {
+                if let Some(path_buf_representing_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument, option_representing_active_engine_bin_dir) {
                     collection.boolean_flag_indicating_primary_target_found = true;
                     collection.option_representing_primary_target_raw_input = Some(string_representing_current_argument);
                     collection.option_representing_absolute_path_to_primary_target_executable = Some(path_buf_representing_physical_absolute_path);
@@ -201,7 +228,7 @@ fn scan_and_collect_physical_entities_and_prefixes(
                 }
             } else {
                 collection.vector_of_strings_representing_remaining_cli_arguments.push(string_representing_current_argument.clone());
-                if let Some(path_buf_representing_secondary_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument) {
+                if let Some(path_buf_representing_secondary_physical_absolute_path) = probe_host_physical_entity(&string_representing_current_argument, option_representing_active_engine_bin_dir) {
                     if let Some(path_slice_representing_parent) = path_buf_representing_secondary_physical_absolute_path.parent() {
                         collection.vector_of_path_bufs_representing_secondary_penetration_mount_sources.push(path_slice_representing_parent.to_path_buf());
                     }
@@ -222,7 +249,7 @@ fn scan_and_collect_physical_entities_and_prefixes(
         }
         
         collection.option_representing_primary_target_raw_input = Some(string_representing_resolved_exe_path.clone());
-        if let Some(path_buf_representing_primary_physical_path) = probe_host_physical_entity(&string_representing_resolved_exe_path) {
+        if let Some(path_buf_representing_primary_physical_path) = probe_host_physical_entity(&string_representing_resolved_exe_path, option_representing_active_engine_bin_dir) {
             collection.boolean_flag_indicating_primary_target_found = true;
             collection.option_representing_absolute_path_to_primary_target_executable = Some(path_buf_representing_primary_physical_path);
         }
@@ -231,7 +258,7 @@ fn scan_and_collect_physical_entities_and_prefixes(
         let string_representing_resolved_prefix_cmd = pyramid.resolve_configuration_value("WINER_EXE_PRE", "");
         for string_slice_representing_prefix_token in string_representing_resolved_prefix_cmd.split_whitespace() {
             if !string_slice_representing_prefix_token.is_empty() {
-                if let Some(path_buf_representing_prefix_physical_path) = probe_host_physical_entity(string_slice_representing_prefix_token) {
+                if let Some(path_buf_representing_prefix_physical_path) = probe_host_physical_entity(string_slice_representing_prefix_token, option_representing_active_engine_bin_dir) {
                     if let Some(path_slice_representing_parent) = path_buf_representing_prefix_physical_path.parent() {
                         collection.vector_of_path_bufs_representing_secondary_penetration_mount_sources.push(path_slice_representing_parent.to_path_buf());
                     }
@@ -284,16 +311,16 @@ fn inject_virtual_desktop_prefix_if_configured_and_safe(
 }
 
 /// 子步骤 3.3：执行 VFS 解引用比对，决算出最终的强类型 TargetCategory 意图分类
+/// 架构回归纯粹：由于探针已经具备引擎优先视野，这里直接恢复最纯粹的原版解引用对比！
 fn disambiguate_target_intent_and_build_specification(
     mut scanned_collection: IntermediateScannedArgumentsCollection,
-    string_representing_custom_wine_binary_path: &str,
+    path_buf_representing_secured_engine_path: PathBuf,
 ) -> TargetSpecification {
     let target_category_enum_representing_execution_type: TargetCategory;
     
     if scanned_collection.boolean_flag_indicating_primary_target_found {
         let path_buf_representing_physical_absolute_path = scanned_collection.option_representing_absolute_path_to_primary_target_executable.clone().unwrap();
         
-        let path_buf_representing_secured_engine_path = fs_absolute_path_secure(Path::new(string_representing_custom_wine_binary_path));
         let mut boolean_flag_indicating_is_wine_multicall_symlink = false;
         
         if let (Ok(path_buf_representing_real_target), Ok(path_buf_representing_real_engine)) = (
@@ -370,10 +397,15 @@ pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
         sandbox_context_representing_runtime_environment.configuration_pyramid_representing_all_layers.resolve_configuration_value("WINER_WINE_PATH", "wine")
     };
 
+    // 新增：将引擎解析彻底前置，并提取其 bin 目录供探针优先使用
+    let path_buf_representing_secured_engine_path = resolve_engine_binary_path(&string_representing_custom_wine_binary_path);
+    let option_representing_active_engine_bin_dir = path_buf_representing_secured_engine_path.parent();
+
     // 步骤 1：扫描 (已融入 CLI 覆盖 vs TOML 默认的严格互斥)
     let mut scanned_collection = scan_and_collect_physical_entities_and_prefixes(
         vector_of_strings_representing_raw_target_and_arguments,
         sandbox_context_representing_runtime_environment,
+        option_representing_active_engine_bin_dir,
     );
 
     // 步骤 2：虚拟桌面安全注入 (确保排在前缀最前列)
@@ -385,6 +417,6 @@ pub fn resolve_target_executable_and_validate_via_multi_arg_scanner(
     // 步骤 3：结算并返回最终实体
     disambiguate_target_intent_and_build_specification(
         scanned_collection,
-        &string_representing_custom_wine_binary_path,
+        path_buf_representing_secured_engine_path,
     )
 }
