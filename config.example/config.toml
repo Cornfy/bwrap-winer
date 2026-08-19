@@ -8,7 +8,9 @@
 #    injected into the sandbox environment as an environment variable.
 #
 # ⚠️ WARNING: Content inside quotes is treated as a literal string.
-#    Shell expansions like '~' or '$HOME' are NOT supported.
+#    Shell expansions like '$HOME' are NOT supported.
+#
+# 💡 NOTE: Leading '~' or '~/' is automatically expanded to your $HOME directory.
 
 
 # =====================================================================
@@ -18,7 +20,7 @@
 # [General Sandbox Settings]
 # Host directory where persistent sandbox directories will be stored.
 # If omitted, it defaults to: ~/.local/share/bwrap-winer/sandboxes
-; WINER_DATA_ROOT = "/home/username/.local/share/bwrap-winer/sandboxes"
+; WINER_DATA_ROOT = "~/.local/share/bwrap-winer/sandboxes"
 
 # Absolute path to a custom Wine binary required for this application.
 # The tool automatically backtracks the parent path, auto-mounts the root,
@@ -105,7 +107,7 @@ WINER_PENETRATE = "1"
 WINEARCH = "win64"
 
 # Core Synchronization Optimization:
-# WINEESYNC = "1"      # Enables Eventfd-based sync (minimizes CPU bottlenecks, requires esync support).
+; WINEESYNC = "1"      # Enables Eventfd-based sync (minimizes CPU bottlenecks, requires esync support).
 WINEFSYNC = "1"        # Enables Futex-based sync (performs better than esync, requires Linux 5.16+).
 
 # Large Address Awareness: Forces 32-bit applications to access up to 4GB memory (fixes RAM out-of-memory crashes).

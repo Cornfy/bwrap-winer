@@ -8,7 +8,9 @@
 #    injected into the sandbox environment as an environment variable.
 #
 # ⚠️ WARNING: Content inside quotes is treated as a literal string.
-#    Shell expansions like '~' or '$HOME' are NOT supported.
+#    Shell expansions like '$HOME' are NOT supported.
+#
+# 💡 NOTE: Leading '~' or '~/' is automatically expanded to your $HOME directory.
 
 
 # [Target Application, Launcher Prefixes & Arguments]
@@ -49,7 +51,7 @@ WINER_GAMEMODE = "1"
 ; WINER_RO_BIND = ""
 
 # Wine Prefix
-WINEPREFIX = '~/Games/prefixes/some-game_prefix'
+; WINEPREFIX = '~/Games/prefixes/some-game_prefix'
 
 # Enable MangoHud
 MANGOHUD = "1"
